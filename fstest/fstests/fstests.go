@@ -2210,6 +2210,115 @@ func Run(t *testing.T, opt *Opt) {
 				}
 			})
 
+			// Run tests for bucket based Fs
+			// TestIntegration/FsMkdir/FsPutFiles/Bucket
+			t.Run("Bucket", func(t *testing.T) {
+				// Test if this Fs is bucket based - this test won't work for wrapped bucket based backends.
+				if !f.Features().BucketBased {
+					t.Skip("Not a bucket based backend")
+				}
+				if f.Features().CanHaveEmptyDirectories {
+					t.Skip("Can have empty directories")
+				}
+				if !f.Features().DoubleSlash {
+					t.Skip("Can't have // in paths")
+				}
+				// Create some troublesome file names
+				fileNames := []string{
+					file1.Path,
+					file2.Path,
+					".leadingdot",
+					"/.leadingdot",
+					"///tripleslash",
+					"//doubleslash",
+					"dir/.leadingdot",
+					"dir///tripleslash",
+					"dir//doubleslash",
+				}
+				dirNames := []string{
+					"hello? sausage",
+					"hello? sausage/êé",
+					"hello? sausage/êé/Hello, 世界",
+					"hello? sausage/êé/Hello, 世界/ \" ' @ < > & ? + ≠",
+					"/",
+					"//",
+					"///",
+					"dir",
+					"dir/",
+					"dir//",
+				}
+				t1 := fstest.Time("2003-02-03T04:05:06.499999999Z")
+				var objs []fs.Object
+				for _, fileName := range fileNames[2:] {
+					contents := "bad file name: " + fileName
+					file := fstest.NewItem(fileName, contents, t1)
+					objs = append(objs, PutTestContents(ctx, t, f, &file, contents, true))
+				}
+
+				// Check they arrived
+				// This uses walk.Walk with a max size set to make sure we don't use ListR
+				check := func(dir string, wantFileNames, wantDirNames []string) {
+					t.Helper()
+					var gotFileNames, gotDirNames []string
+					require.NoError(t, walk.Walk(ctx, f, dir, true, 100, func(path string, entries fs.DirEntries, err error) error {
+						if err != nil {
+							return err
+						}
+						for _, entry := range entries {
+							if _, isObj := entry.(fs.Object); isObj {
+								gotFileNames = append(gotFileNames, entry.Remote())
+							} else {
+								gotDirNames = append(gotDirNames, entry.Remote())
+							}
+						}
+						return nil
+					}))
+					sort.Strings(wantDirNames)
+					sort.Strings(wantFileNames)
+					sort.Strings(gotDirNames)
+					sort.Strings(gotFileNames)
+					assert.Equal(t, wantFileNames, gotFileNames)
+					assert.Equal(t, wantDirNames, gotDirNames)
+				}
+				check("", fileNames, dirNames)
+				check("/", []string{
+					"/.leadingdot",
+					"///tripleslash",
+					"//doubleslash",
+				}, []string{
+					"//",
+					"///",
+				})
+				check("//", []string{
+					"///tripleslash",
+					"//doubleslash",
+				}, []string{
+					"///",
+				})
+				check("dir/", []string{
+					"dir///tripleslash",
+					"dir//doubleslash",
+				}, []string{
+					"dir//",
+				})
+				check("dir//", []string{
+					"dir///tripleslash",
+				}, nil)
+
+				// Remove the objects
+				for _, obj := range objs {
+					assert.NoError(t, obj.Remove(ctx))
+				}
+
+				// Check they are gone
+				fstest.CheckListingWithPrecision(t, f, []fstest.Item{file1, file2}, []string{
+					"hello? sausage",
+					"hello? sausage/êé",
+					"hello? sausage/êé/Hello, 世界",
+					"hello? sausage/êé/Hello, 世界/ \" ' @ < > & ? + ≠",
+				}, fs.GetModifyWindow(ctx, f))
+			})
+
 		})
 
 		// TestFsPutChunked may trigger large buffer allocation with
