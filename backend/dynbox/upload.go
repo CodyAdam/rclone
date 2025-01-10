@@ -5,14 +5,11 @@ package dynbox
 import (
 	"bytes"
 	"context"
-	"crypto/sha1"
-	"encoding/base64"
-	"encoding/json"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
 	"sync"
 	"time"
 
@@ -23,169 +20,46 @@ import (
 	"github.com/rclone/rclone/lib/rest"
 )
 
-// createUploadSession creates an upload session for the object
-func (o *Object) createUploadSession(ctx context.Context, leaf, directoryID string, size int64) (response *api.UploadSessionResponse, err error) {
-	opts := rest.Opts{
-		Method:  "POST",
-		Path:    "/files/upload_sessions",
-		RootURL: uploadURL,
-	}
-	request := api.UploadSessionRequest{
-		FileSize: size,
-	}
-	// If object has an ID then it is existing so create a new version
-	if o.id != "" {
-		opts.Path = "/files/" + o.id + "/upload_sessions"
-	} else {
-		opts.Path = "/files/upload_sessions"
-		request.FolderID = directoryID
-		request.FileName = o.fs.opt.Enc.FromStandardName(leaf)
-	}
-	var resp *http.Response
-	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = o.fs.srv.CallJSON(ctx, &opts, &request, &response)
-		return shouldRetry(ctx, resp, err)
-	})
-	return
-}
+const (
+	GB = 1024 * 1024 * 1024
+	MB = 1024 * 1024
+)
 
-// sha1Digest produces a digest using sha1 as per RFC3230
-func sha1Digest(digest []byte) string {
-	return "sha=" + base64.StdEncoding.EncodeToString(digest)
-}
-
-// uploadPart uploads a part in an upload session
-func (o *Object) uploadPart(ctx context.Context, SessionID string, offset, totalSize int64, chunk []byte, wrap accounting.WrapFn, options ...fs.OpenOption) (response *api.UploadPartResponse, err error) {
-	chunkSize := int64(len(chunk))
-	sha1sum := sha1.Sum(chunk)
-	opts := rest.Opts{
-		Method:        "PUT",
-		Path:          "/files/upload_sessions/" + SessionID,
-		RootURL:       uploadURL,
-		ContentType:   "application/octet-stream",
-		ContentLength: &chunkSize,
-		ContentRange:  fmt.Sprintf("bytes %d-%d/%d", offset, offset+chunkSize-1, totalSize),
-		Options:       options,
-		ExtraHeaders: map[string]string{
-			"Digest": sha1Digest(sha1sum[:]),
-		},
+// getChunkSize returns the appropriate chunk size based on file size
+func getChunkSize(size int64) int64 {
+	switch {
+	case size == 0:
+		return 50 * MB
+	case size > 100*GB:
+		return 400 * MB
+	case size > 1*GB:
+		return 100 * MB
+	default:
+		return 50 * MB
 	}
-	var resp *http.Response
-	err = o.fs.pacer.Call(func() (bool, error) {
-		opts.Body = wrap(bytes.NewReader(chunk))
-		resp, err = o.fs.srv.CallJSON(ctx, &opts, nil, &response)
-		return shouldRetry(ctx, resp, err)
-	})
-	if err != nil {
-		return nil, err
-	}
-	return response, nil
-}
-
-// commitUpload finishes an upload session
-func (o *Object) commitUpload(ctx context.Context, SessionID string, parts []api.Part, modTime time.Time, sha1sum []byte) (result *api.FolderItems, err error) {
-	opts := rest.Opts{
-		Method:  "POST",
-		Path:    "/files/upload_sessions/" + SessionID + "/commit",
-		RootURL: uploadURL,
-		ExtraHeaders: map[string]string{
-			"Digest": sha1Digest(sha1sum),
-		},
-	}
-	request := api.CommitUpload{
-		Parts: parts,
-	}
-	request.Attributes.ContentModifiedAt = api.Time(modTime)
-	request.Attributes.ContentCreatedAt = api.Time(modTime)
-	var body []byte
-	var resp *http.Response
-	// For discussion of this value see:
-	// https://github.com/rclone/rclone/issues/2054
-	maxTries := o.fs.opt.CommitRetries
-	const defaultDelay = 10
-	var tries int
-outer:
-	for tries = 0; tries < maxTries; tries++ {
-		err = o.fs.pacer.Call(func() (bool, error) {
-			resp, err = o.fs.srv.CallJSON(ctx, &opts, &request, nil)
-			if err != nil {
-				return shouldRetry(ctx, resp, err)
-			}
-			body, err = rest.ReadBody(resp)
-			return shouldRetry(ctx, resp, err)
-		})
-		delay := defaultDelay
-		var why string
-		if err != nil {
-			// Sometimes we get 400 Error with
-			// parts_mismatch immediately after uploading
-			// the last part.  Ignore this error and wait.
-			if boxErr, ok := err.(*api.Error); ok && boxErr.Code == "parts_mismatch" {
-				why = err.Error()
-			} else {
-				return nil, err
-			}
-		} else {
-			switch resp.StatusCode {
-			case http.StatusOK, http.StatusCreated:
-				break outer
-			case http.StatusAccepted:
-				why = "not ready yet"
-				delayString := resp.Header.Get("Retry-After")
-				if delayString != "" {
-					delay, err = strconv.Atoi(delayString)
-					if err != nil {
-						fs.Debugf(o, "Couldn't decode Retry-After header %q: %v", delayString, err)
-						delay = defaultDelay
-					}
-				}
-			default:
-				return nil, fmt.Errorf("unknown HTTP status return %q (%d)", resp.Status, resp.StatusCode)
-			}
-		}
-		fs.Debugf(o, "commit multipart upload failed %d/%d - trying again in %d seconds (%s)", tries+1, maxTries, delay, why)
-		time.Sleep(time.Duration(delay) * time.Second)
-	}
-	if tries >= maxTries {
-		return nil, errors.New("too many tries to commit multipart upload - increase --low-level-retries")
-	}
-	err = json.Unmarshal(body, &result)
-	if err != nil {
-		return nil, fmt.Errorf("couldn't decode commit response: %q: %w", body, err)
-	}
-	return result, nil
-}
-
-// abortUpload cancels an upload session
-func (o *Object) abortUpload(ctx context.Context, SessionID string) (err error) {
-	opts := rest.Opts{
-		Method:     "DELETE",
-		Path:       "/files/upload_sessions/" + SessionID,
-		RootURL:    uploadURL,
-		NoResponse: true,
-	}
-	var resp *http.Response
-	err = o.fs.pacer.Call(func() (bool, error) {
-		resp, err = o.fs.srv.Call(ctx, &opts)
-		return shouldRetry(ctx, resp, err)
-	})
-	return err
 }
 
 // uploadMultipart uploads a file using multipart upload
 func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, modTime time.Time, options ...fs.OpenOption) (err error) {
+
 	// Create upload session
-	session, err := o.createUploadSession(ctx, leaf, directoryID, size)
+	session, err := o.createUploadSession(ctx, leaf, directoryID, size, modTime)
 	if err != nil {
 		return fmt.Errorf("multipart upload create session failed: %w", err)
 	}
-	chunkSize := session.PartSize
-	fs.Debugf(o, "Multipart upload session started for %d parts of size %v", session.TotalParts, fs.SizeSuffix(chunkSize))
+	if session.MultipartUploadId == nil {
+		// No upload needed - file was cached
+		return nil
+	}
+
+	chunkSize := getChunkSize(size)
+	totalParts := (size + chunkSize - 1) / chunkSize // Round up division
+	fs.Debugf(o, "Multipart upload session started for %d parts of size %v", totalParts, fs.SizeSuffix(chunkSize))
 
 	// Cancel the session if something went wrong
 	defer atexit.OnError(&err, func() {
 		fs.Debugf(o, "Cancelling multipart upload: %v", err)
-		cancelErr := o.abortUpload(ctx, session.ID)
+		cancelErr := o.abortUpload(ctx, *session.MultipartUploadId, *session.Key)
 		if cancelErr != nil {
 			fs.Logf(o, "Failed to cancel multipart upload: %v", cancelErr)
 		}
@@ -198,12 +72,12 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, direct
 	// Upload the chunks
 	remaining := size
 	position := int64(0)
-	parts := make([]api.Part, session.TotalParts)
-	hash := sha1.New()
-	errs := make(chan error, 1)
+	parts := make([]api.Part, totalParts)
+	hash := sha256.New()
+	errs := make(chan error, totalParts)
 	var wg sync.WaitGroup
 outer:
-	for part := 0; part < session.TotalParts; part++ {
+	for part := int64(0); part < totalParts; part++ {
 		// Check any errors
 		select {
 		case err = <-errs:
@@ -231,12 +105,10 @@ outer:
 
 		// Transfer the chunk
 		wg.Add(1)
-		o.fs.uploadToken.Get()
-		go func(part int, position int64) {
+		go func(part int64, position int64) {
 			defer wg.Done()
-			defer o.fs.uploadToken.Put()
-			fs.Debugf(o, "Uploading part %d/%d offset %v/%v part size %v", part+1, session.TotalParts, fs.SizeSuffix(position), fs.SizeSuffix(size), fs.SizeSuffix(chunkSize))
-			partResponse, err := o.uploadPart(ctx, session.ID, position, size, buf, wrap, options...)
+			fs.Debugf(o, "Uploading part %d/%d offset %v/%v part size %v", part+1, totalParts, fs.SizeSuffix(position), fs.SizeSuffix(size), fs.SizeSuffix(chunkSize))
+			partResponse, err := o.uploadPart(ctx, *session.MultipartUploadId, part+1, buf, wrap, options...)
 			if err != nil {
 				err = fmt.Errorf("multipart upload failed to upload part: %w", err)
 				select {
@@ -245,7 +117,7 @@ outer:
 				}
 				return
 			}
-			parts[part] = partResponse.Part
+			parts[part] = partResponse
 		}(part, position)
 
 		// ready for next block
@@ -264,13 +136,160 @@ outer:
 	}
 
 	// Finalise the upload session
-	result, err := o.commitUpload(ctx, session.ID, parts, modTime, hash.Sum(nil))
+	err = o.commitUpload(ctx, *session.MultipartUploadId, parts)
 	if err != nil {
 		return fmt.Errorf("multipart upload failed to finalize: %w", err)
 	}
 
-	if result.TotalCount != 1 || len(result.Entries) != 1 {
-		return fmt.Errorf("multipart upload failed %v - not sure why", o)
+	return nil
+}
+
+// createUploadSession creates an upload session for the object
+func (o *Object) createUploadSession(ctx context.Context, leaf string, directoryID string, size int64, modTime time.Time) (uploadResp *api.UploadMultipartRequestResponse, err error) {
+	var uploadReq interface{}
+	var endpoint string
+
+	if o.id != "" {
+		// Update existing file
+		uploadReq = api.RequestUploadUpdate{
+			Size:      size,
+			Type:      o.contentType,
+			Hash:      o.hash,
+			UpdatedAt: (*api.Time)(&modTime),
+		}
+		endpoint = "/fs/files/" + o.id + "/upload/multipart"
+	} else {
+		// Create new file
+		uploadReq = api.RequestUploadCreate{
+			Name:      o.fs.opt.Enc.FromStandardName(leaf),
+			Size:      size,
+			Type:      o.contentType,
+			VaultID:   o.fs.opt.VaultID,
+			Hash:      o.hash,
+			CreatedAt: (*api.Time)(&modTime),
+			ParentID:  &directoryID,
+		}
+		endpoint = "/fs/files/upload/multipart"
 	}
-	return o.setMetaData(&result.Entries[0])
+
+	var resp *http.Response
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   endpoint,
+	}
+
+	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
+		resp, err = o.fs.srv.CallJSON(ctx, &opts, uploadReq, &uploadResp)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return nil, err
+	}
+
+	return uploadResp, nil
+}
+
+// uploadPart uploads a part in an upload session
+func (o *Object) uploadPart(ctx context.Context, SessionID string, partNumber int64, chunk []byte, wrap accounting.WrapFn, options ...fs.OpenOption) (response api.Part, err error) {
+	// Get presigned URL for this part
+	opts := rest.Opts{
+		Method:  "PUT",
+		Path:    "/fs/files/upload/multipart/" + SessionID,
+		Options: options,
+	}
+
+	signRequest := api.SignPartRequest{
+		Key: o.id,
+		Parts: []struct {
+			PartNumber int64 `json:"PartNumber"`
+		}{{PartNumber: partNumber}},
+	}
+
+	var signResponse api.SignPartResponse
+	err = o.fs.pacer.Call(func() (bool, error) {
+		resp, err := o.fs.srv.CallJSON(ctx, &opts, &signRequest, &signResponse)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return response, fmt.Errorf("failed to get presigned URL: %w", err)
+	}
+
+	if len(signResponse) == 0 {
+		return response, errors.New("no presigned URL returned")
+	}
+
+	// Upload the part using the presigned URL
+	chunkSize := int64(len(chunk))
+	presignedURL := signResponse[0].UploadUrl
+	req, err := http.NewRequestWithContext(ctx, "PUT", presignedURL, wrap(bytes.NewReader(chunk)))
+	if err != nil {
+		return response, fmt.Errorf("failed to create request: %w", err)
+	}
+	req.ContentLength = chunkSize
+
+	client := http.DefaultClient
+	resp, err := client.Do(req)
+	if err != nil {
+		return response, fmt.Errorf("failed to upload part: %w", err)
+	}
+	defer fs.CheckClose(resp.Body, &err)
+
+	if resp.StatusCode != http.StatusOK {
+		return response, fmt.Errorf("failed to upload part: %s", resp.Status)
+	}
+
+	// Get ETag from response
+	etag := resp.Header.Get("ETag")
+	if etag == "" {
+		return response, errors.New("no ETag returned from upload")
+	}
+
+	response = api.Part{
+		PartNumber: partNumber,
+		Size:       chunkSize,
+		ETag:       etag,
+	}
+
+	return response, nil
+}
+
+// commitUpload finishes an upload session
+func (o *Object) commitUpload(ctx context.Context, SessionID string, parts []api.Part) (err error) {
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   "/fs/files/upload/multipart/" + SessionID,
+	}
+
+	request := api.CompleteMultipartUpload{
+		Key:   o.id,
+		Parts: parts,
+	}
+
+	var response api.CompleteMultipartUploadResponse
+	err = o.fs.pacer.Call(func() (bool, error) {
+		resp, err := o.fs.srv.CallJSON(ctx, &opts, &request, &response)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return fmt.Errorf("failed to complete multipart upload: %w", err)
+	}
+	return nil
+}
+
+// abortUpload cancels an upload session
+func (o *Object) abortUpload(ctx context.Context, SessionID string, Key string) (err error) {
+	opts := rest.Opts{
+		Method:     "DELETE",
+		Path:       "/fs/files/" + o.id + "/upload/multipart/" + SessionID,
+		NoResponse: true,
+	}
+	input := api.UploadAbortRequest{
+		Key: Key,
+	}
+	var resp *http.Response
+	err = o.fs.pacer.Call(func() (bool, error) {
+		resp, err = o.fs.srv.CallJSON(ctx, &opts, &input, nil)
+		return shouldRetry(ctx, resp, err)
+	})
+	return err
 }

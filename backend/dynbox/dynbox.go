@@ -6,8 +6,8 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"path"
-	"strconv"
 	"strings"
 	"time"
 
@@ -32,7 +32,7 @@ const (
 	decayConstant       = 2                // bigger for slower decay, exponential
 	defaultUploadCutoff = 50 * 1024 * 1024 // 50MB
 	accessCookieName    = "authjs.session-token"
-	rootFolderID        = "root"
+	rootID              = "root"
 	// accessCookieName    = "__Secure-authjs.session-token"
 )
 
@@ -151,12 +151,6 @@ func (f *Fs) Hashes() hash.Set {
 	return hash.Set(hash.SHA256)
 }
 
-// parsePath parses a dynbox 'url'
-func parsePath(path string) (root string) {
-	root = strings.Trim(path, "/")
-	return
-}
-
 // retryErrorCodes is a slice of error codes that we will retry
 var retryErrorCodes = []int{
 	429, // Too Many Requests.
@@ -209,7 +203,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 		return nil, err
 	}
 
-	root = parsePath(root)
+	root = strings.Trim(root, "/")
 
 	f := &Fs{
 		name:  name,
@@ -237,15 +231,16 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 
 	// Get rootFolderID
-	f.dirCache = dircache.New(root, rootFolderID, f)
+	f.dirCache = dircache.New(root, rootID, f)
 
 	// Find the current root
 	err = f.dirCache.FindRoot(ctx, false)
+	fs.Debugf(f, "Finding root: %v", err)
 	if err != nil {
 		// Assume it is a file
 		newRoot, remote := dircache.SplitPath(root)
 		tempF := *f
-		tempF.dirCache = dircache.New(newRoot, rootFolderID, &tempF)
+		tempF.dirCache = dircache.New(newRoot, rootID, &tempF)
 		tempF.root = newRoot
 		// Make new Fs which is the parent
 		err = tempF.dirCache.FindRoot(ctx, false)
@@ -286,14 +281,14 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 	opts := rest.Opts{
 		Method: "GET",
 		Path:   "/fs/usage",
-	}
-	input := api.Vault{
-		ID: f.opt.VaultID,
+		Parameters: url.Values{
+			"vault_id": []string{f.opt.VaultID},
+		},
 	}
 	var data api.Usage
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, &input, &data)
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &data)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
@@ -332,7 +327,7 @@ func (f *Fs) CreateDir(ctx context.Context, pathID, leaf string) (newID string, 
 		fmt.Printf("...Error %v\n", err)
 		return "", err
 	}
-	fmt.Printf("...Id %q\n", *&info.ID)
+	fmt.Printf("...Id %q\n", info.ID)
 	return info.ID, nil
 }
 
@@ -366,7 +361,7 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.Fil
 // readMetaDataForPath reads the metadata from the path
 func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.FileItem, err error) {
 	opts := rest.Opts{
-		Method: "GET",
+		Method: "POST",
 		Path:   "/fs/files",
 	}
 	input := api.GetMetadataFromPath{
@@ -411,18 +406,17 @@ type listAllFn func(*api.FileItem, *api.FolderItem) bool // (file (nil if not fi
 func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, filesOnly bool, activeOnly bool, fn listAllFn) (found bool, err error) {
 	opts := rest.Opts{
 		Method: "GET",
-		Path:   "/fs/folders/items",
-	}
-
-	input := api.GetFolderItems{
-		FolderID: dirID,
-		VaultID:  f.opt.VaultID,
+		Path:   "/fs/folders/" + dirID + "/items",
+		Parameters: url.Values{
+			"folderId": []string{dirID},
+			"vaultId":  []string{f.opt.VaultID},
+		},
 	}
 
 	var result api.FolderItems
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, &input, &result)
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
@@ -566,11 +560,6 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 	return o, o.Update(ctx, in, src, options...)
 }
 
-// PutStream uploads to the remote path with the modTime given of indeterminate size
-func (f *Fs) PutStream(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (fs.Object, error) {
-	return f.Put(ctx, in, src, options...)
-}
-
 // PutUnchecked the object into the container
 //
 // This will produce an error if the object already exists.
@@ -604,8 +593,10 @@ func (f *Fs) createObject(ctx context.Context, remote string, modTime time.Time,
 	}
 	// Temporary Object under construction
 	o = &Object{
-		fs:     f,
-		remote: remote,
+		fs:      f,
+		modTime: modTime,
+		size:    size,
+		remote:  remote,
 	}
 	return o, leaf, directoryID, nil
 }
@@ -925,7 +916,6 @@ func (f *Fs) CleanUp(ctx context.Context) (err error) {
 	return nil
 }
 
-// FIXME ChangeNotify is not supported yet Don't know what it's for yet
 // ChangeNotify calls the passed function with a path that has had changes.
 // If the implementation uses polling, it should adhere to the given interval.
 //
@@ -934,11 +924,8 @@ func (f *Fs) CleanUp(ctx context.Context) (err error) {
 // Close the returned channel to stop being notified.
 func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryType), pollIntervalChan <-chan time.Duration) {
 	go func() {
-		// get the `stream_position` early so all changes from now on get processed
-		streamPosition, err := f.changeNotifyStreamPosition(ctx)
-		if err != nil {
-			fs.Infof(f, "Failed to get StreamPosition: %s", err)
-		}
+		// Start tracking changes from now
+		streamPosition := time.Now()
 
 		// box can send duplicate Event IDs. Use this map to track and filter
 		// the ones we've already processed.
@@ -964,14 +951,6 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 					tickerC = ticker.C
 				}
 			case <-tickerC:
-				if streamPosition == "" {
-					streamPosition, err = f.changeNotifyStreamPosition(ctx)
-					if err != nil {
-						fs.Infof(f, "Failed to get StreamPosition: %s", err)
-						continue
-					}
-				}
-
 				// Garbage collect EventIDs older than 1 minute
 				for eventID, timestamp := range processedEventIDs {
 					if time.Since(timestamp) > time.Minute {
@@ -979,6 +958,7 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 					}
 				}
 
+				var err error
 				streamPosition, err = f.changeNotifyRunner(ctx, notifyFunc, streamPosition, processedEventIDs)
 				if err != nil {
 					fs.Infof(f, "Change notify listener failure: %s", err)
@@ -988,207 +968,105 @@ func (f *Fs) ChangeNotify(ctx context.Context, notifyFunc func(string, fs.EntryT
 	}()
 }
 
-// TODO
-func (f *Fs) changeNotifyStreamPosition(ctx context.Context) (streamPosition string, err error) {
+func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.EntryType), streamPosition time.Time, processedEventIDs map[string]time.Time) (nextStreamPosition time.Time, err error) {
 	opts := rest.Opts{
 		Method: "GET",
-		Path:   "/events",
+		Path:   "/events/" + f.opt.VaultID,
+		Parameters: url.Values{
+			"datePosition": []string{streamPosition.Format(time.RFC3339)},
+		},
 	}
-	opts.Parameters.Set("stream_position", "now")
-	opts.Parameters.Set("stream_type", "changes")
 
 	var result api.Events
 	var resp *http.Response
+	fs.Debugf(f, "Checking for changes on remote (date_position: %v)", streamPosition)
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
-		return "", err
+		return streamPosition, err
 	}
 
-	return strconv.FormatInt(result.NextStreamPosition, 10), nil
+	if len(result.Events) == 0 {
+		return time.Time(result.NewPosition), nil
+	}
+
+	type pathToClear struct {
+		path      string
+		entryType fs.EntryType
+	}
+	var pathsToClear []pathToClear
+	newEventIDs := 0
+
+	for _, event := range result.Events {
+		// Skip already processed events
+		if _, ok := processedEventIDs[event.ID]; ok {
+			continue
+		}
+		processedEventIDs[event.ID] = time.Now()
+		newEventIDs++
+
+		// Determine entry type based on event type
+		var entryType fs.EntryType
+		if strings.HasPrefix(string(event.Type), "file.") {
+			entryType = fs.EntryObject
+		} else if strings.HasPrefix(string(event.Type), "folder.") {
+			entryType = fs.EntryDirectory
+		} else {
+			continue
+		}
+
+		// Get all paths that need to be checked for this event
+		paths := f.getPathsFromEventData(event)
+		for _, path := range paths {
+			if path == "" {
+				continue
+			}
+
+			pathsToClear = append(pathsToClear, pathToClear{
+				path:      path,
+				entryType: entryType,
+			})
+
+			// If this is a directory event, flush the directory cache
+			if entryType == fs.EntryDirectory {
+				f.dirCache.FlushDir(path)
+			}
+		}
+	}
+
+	// Notify about all changes
+	notifiedPaths := make(map[string]bool)
+	for _, p := range pathsToClear {
+		if _, ok := notifiedPaths[p.path]; ok {
+			continue
+		}
+		notifiedPaths[p.path] = true
+		notifyFunc(p.path, p.entryType)
+	}
+
+	fs.Debugf(f, "Received %v events, resulting in %v paths and %v notifications",
+		len(result.Events), len(pathsToClear), len(notifiedPaths))
+
+	return time.Time(result.NewPosition), nil
 }
 
-// Attempts to construct the full path for an object, given the ID of its
-// parent directory and the name of the object.
-//
-// Can return "" if the parentID is not currently in the directory cache.
-func (f *Fs) getFullPath(parentID string, childName string) (fullPath string) {
-	fullPath = ""
-	name := f.opt.Enc.ToStandardName(childName)
-	if parentID != "" {
-		if parentDir, ok := f.dirCache.GetInv(parentID); ok {
-			if len(parentDir) > 0 {
-				fullPath = parentDir + "/" + name
-			} else {
-				fullPath = name
-			}
-		}
-	} else {
-		// No parent, this object is at the root
-		fullPath = name
+// getPathsFromEventData extracts all relevant file/folder paths from the event data
+func (f *Fs) getPathsFromEventData(event api.Event) []string {
+	var paths []string
+
+	// Always check current path if available
+	if event.Data.Path != "" {
+		paths = append(paths, event.Data.Path)
 	}
-	return fullPath
-}
 
-// TODO
-func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.EntryType), streamPosition string, processedEventIDs map[string]time.Time) (nextStreamPosition string, err error) {
-	nextStreamPosition = streamPosition
-
-	for {
-		limit := f.opt.ListChunk
-
-		// box only allows a max of 500 events
-		if limit > 500 {
-			limit = 500
-		}
-
-		opts := rest.Opts{
-			Method: "GET",
-			Path:   "/events",
-		}
-		opts.Parameters.Set("stream_position", nextStreamPosition)
-		opts.Parameters.Set("stream_type", "changes")
-		opts.Parameters.Set("limit", strconv.Itoa(limit))
-
-		var result api.Events
-		var resp *http.Response
-		fs.Debugf(f, "Checking for changes on remote (next_stream_position: %q)", nextStreamPosition)
-		err = f.pacer.Call(func() (bool, error) {
-			resp, err = f.srv.CallJSON(ctx, &opts, nil, &result)
-			return shouldRetry(ctx, resp, err)
-		})
-		if err != nil {
-			return "", err
-		}
-
-		if result.ChunkSize != int64(len(result.Entries)) {
-			return "", fmt.Errorf("invalid response to event request, chunk_size (%v) not equal to number of entries (%v)", result.ChunkSize, len(result.Entries))
-		}
-
-		nextStreamPosition = strconv.FormatInt(result.NextStreamPosition, 10)
-		if result.ChunkSize == 0 {
-			return nextStreamPosition, nil
-		}
-
-		type pathToClear struct {
-			path      string
-			entryType fs.EntryType
-		}
-		var pathsToClear []pathToClear
-		newEventIDs := 0
-		for _, entry := range result.Entries {
-			eventDetails := fmt.Sprintf("[%q(%d)|%s|%s|%s|%s]", entry.Source.Name, entry.Source.SequenceID,
-				entry.Source.Type, entry.EventType, entry.Source.ID, entry.EventID)
-
-			if entry.EventID == "" {
-				fs.Debugf(f, "%s ignored due to missing EventID", eventDetails)
-				continue
-			}
-			if _, ok := processedEventIDs[entry.EventID]; ok {
-				fs.Debugf(f, "%s ignored due to duplicate EventID", eventDetails)
-				continue
-			}
-			processedEventIDs[entry.EventID] = time.Now()
-			newEventIDs++
-
-			if entry.Source.ID == "" { // missing File or Folder ID
-				fs.Debugf(f, "%s ignored due to missing SourceID", eventDetails)
-				continue
-			}
-			if entry.Source.Type != api.ItemTypeFile && entry.Source.Type != api.ItemTypeFolder { // event is not for a file or folder
-				fs.Debugf(f, "%s ignored due to unsupported SourceType", eventDetails)
-				continue
-			}
-
-			// Only interested in event types that result in a file tree change
-			if _, found := api.FileTreeChangeEventTypes[entry.EventType]; !found {
-				fs.Debugf(f, "%s ignored due to unsupported EventType", eventDetails)
-				continue
-			}
-
-			f.itemMetaCacheMu.Lock()
-			itemMeta, cachedItemMetaFound := f.itemMetaCache[entry.Source.ID]
-			if cachedItemMetaFound {
-				if itemMeta.SequenceID >= entry.Source.SequenceID {
-					// Item in the cache has the same or newer SequenceID than
-					// this event. Ignore this event, it must be old.
-					f.itemMetaCacheMu.Unlock()
-					fs.Debugf(f, "%s ignored due to old SequenceID (%q)", eventDetails, itemMeta.SequenceID)
-					continue
-				}
-
-				// This event is newer. Delete its entry from the cache,
-				// we'll notify about its change below, then it's up to a
-				// future list operation to repopulate the cache.
-				delete(f.itemMetaCache, entry.Source.ID)
-			}
-			f.itemMetaCacheMu.Unlock()
-
-			entryType := fs.EntryDirectory
-			if entry.Source.Type == api.ItemTypeFile {
-				entryType = fs.EntryObject
-			}
-
-			// The box event only includes the new path for the object (e.g.
-			// the path after the object was moved). If there was an old path
-			// saved in our cache, it must be cleared.
-			if cachedItemMetaFound {
-				path := f.getFullPath(itemMeta.ParentID, itemMeta.Name)
-				if path != "" {
-					fs.Debugf(f, "%s added old path (%q) for notify", eventDetails, path)
-					pathsToClear = append(pathsToClear, pathToClear{path: path, entryType: entryType})
-				} else {
-					fs.Debugf(f, "%s old parent not cached", eventDetails)
-				}
-
-				// If this is a directory, also delete it from the dir cache.
-				// This will effectively invalidate the item metadata cache
-				// entries for all descendents of this directory, since we
-				// will no longer be able to construct a full path for them.
-				// This is exactly what we want, since we don't want to notify
-				// on the paths of these descendents if one of their ancestors
-				// has been renamed/deleted.
-				if entry.Source.Type == api.ItemTypeFolder {
-					f.dirCache.FlushDir(path)
-				}
-			}
-
-			// If the item is "active", then it is not trashed or deleted, so
-			// it potentially has a valid parent.
-			//
-			// Construct the new path of the object, based on the Parent ID
-			// and its name. If we get an empty result, it means we don't
-			// currently know about this object so notification is unnecessary.
-			if entry.Source.ItemStatus == api.ItemStatusActive {
-				path := f.getFullPath(entry.Source.Parent.ID, entry.Source.Name)
-				if path != "" {
-					fs.Debugf(f, "%s added new path (%q) for notify", eventDetails, path)
-					pathsToClear = append(pathsToClear, pathToClear{path: path, entryType: entryType})
-				} else {
-					fs.Debugf(f, "%s new parent not found", eventDetails)
-				}
-			}
-		}
-
-		// box can sometimes repeatedly return the same Event IDs within a
-		// short period of time. If it stops giving us new ones, treat it
-		// the same as if it returned us none at all.
-		if newEventIDs == 0 {
-			return nextStreamPosition, nil
-		}
-
-		notifiedPaths := make(map[string]bool)
-		for _, p := range pathsToClear {
-			if _, ok := notifiedPaths[p.path]; ok {
-				continue
-			}
-			notifiedPaths[p.path] = true
-			notifyFunc(p.path, p.entryType)
-		}
-		fs.Debugf(f, "Received %v events, resulting in %v paths and %v notifications", len(result.Entries), len(pathsToClear), len(notifiedPaths))
+	// For operations like move/rename, also check the previous path
+	if event.Data.PreviousPath != "" {
+		paths = append(paths, event.Data.PreviousPath)
 	}
+
+	return paths
 }
 
 // DirCacheFlush resets the directory cache - used in testing as an
@@ -1401,11 +1279,15 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 	if err != nil {
 		return err
 	}
+	if uploadResp.UploadUrl == nil {
+		// No upload needed - file was cached
+		return nil
+	}
 
 	// Upload the file to the provided signed URL
 	opts = rest.Opts{
 		Method:  "PUT",
-		RootURL: uploadResp.UploadUrl,
+		RootURL: *uploadResp.UploadUrl,
 		Body:    in,
 		Options: options,
 	}
@@ -1435,7 +1317,6 @@ func (o *Object) ID() string {
 var (
 	_ fs.Fs              = (*Fs)(nil)
 	_ fs.Purger          = (*Fs)(nil)
-	_ fs.PutStreamer     = (*Fs)(nil)
 	_ fs.Copier          = (*Fs)(nil)
 	_ fs.Abouter         = (*Fs)(nil)
 	_ fs.Mover           = (*Fs)(nil)

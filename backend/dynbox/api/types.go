@@ -179,6 +179,8 @@ type UpdateFileMetadata struct {
 	UpdatedAt Time `json:"updatedAt"`
 }
 
+// --- single upload ---
+
 type RequestUploadUpdate struct {
 	Size      int64  `json:"size"`
 	Type      string `json:"type"`
@@ -197,90 +199,117 @@ type RequestUploadCreate struct {
 }
 
 type UploadRequestResponse struct {
+	UploadUrl *string `json:"uploadUrl"`
+	Key       *string `json:"key"`
+}
+
+type UploadMultipartRequestResponse struct {
+	MultipartUploadId *string `json:"multipartUploadId"`
+	Key               *string `json:"key"`
+}
+
+type UploadAbortRequest struct {
+	Key string `json:"key"`
+}
+
+// --- events ---
+
+// EventType represents the type of event that occurred
+type EventType string
+
+const (
+	EventTypeFileCreated           EventType = "file.created"
+	EventTypeFileCopied            EventType = "file.copied"
+	EventTypeFileUpdated           EventType = "file.updated"
+	EventTypeFileMoved             EventType = "file.moved"
+	EventTypeFileRenamed           EventType = "file.renamed"
+	EventTypeFileTrashed           EventType = "file.trashed"
+	EventTypeFileContentDownloaded EventType = "file.content.downloaded"
+	EventTypeFileContentUploaded   EventType = "file.content.uploaded"
+	EventTypeFileRestored          EventType = "file.restored"
+	EventTypeFolderCreated         EventType = "folder.created"
+	EventTypeFolderDeleted         EventType = "folder.deleted"
+	EventTypeFolderMoved           EventType = "folder.moved"
+	EventTypeFolderRenamed         EventType = "folder.renamed"
+	EventTypeFolderTrashed         EventType = "folder.trashed"
+	EventTypeFolderRestored        EventType = "folder.restored"
+)
+
+// FileTreeChangeEventTypes are the events that can require cache invalidation
+var FileTreeChangeEventTypes = map[EventType]struct{}{
+	EventTypeFileCreated:         {},
+	EventTypeFileCopied:          {},
+	EventTypeFileUpdated:         {},
+	EventTypeFileMoved:           {},
+	EventTypeFileRenamed:         {},
+	EventTypeFileTrashed:         {},
+	EventTypeFileContentUploaded: {},
+	EventTypeFileRestored:        {},
+	EventTypeFolderCreated:       {},
+	EventTypeFolderDeleted:       {},
+	EventTypeFolderMoved:         {},
+	EventTypeFolderRenamed:       {},
+	EventTypeFolderTrashed:       {},
+	EventTypeFolderRestored:      {},
+}
+
+// EventData represents the common fields for event data
+type EventData struct {
+	EntityID     string `json:"entityId"`
+	Path         string `json:"path,omitempty"`
+	PreviousPath string `json:"previousPath,omitempty"`
+}
+
+// Event represents a single event from the events API
+type Event struct {
+	ID        string    `json:"id"`
+	VaultID   string    `json:"vaultId"`
+	Type      EventType `json:"type"`
+	Data      EventData `json:"data"`
+	AuthorID  *string   `json:"authorId"`
+	CreatedAt Time      `json:"createdAt"`
+}
+
+// Events represents the response from the events API
+type Events struct {
+	HasMore     bool    `json:"hasMore"`
+	Events      []Event `json:"events"`
+	NewPosition Time    `json:"newPosition"`
+}
+
+// --- multipart upload ---
+
+type ListPartsRequest struct {
+	Key string `json:"key"`
+}
+
+type ListPartsResponse []Part
+
+type Part struct {
+	PartNumber int64  `json:"partNumber"`
+	ETag       string `json:"ETag,omitempty"`
+	Size       int64  `json:"Size,omitempty"`
+}
+
+type PartWithUrl struct {
+	Part
 	UploadUrl string `json:"uploadUrl"`
 }
 
-// TODO TO UPDATE: -----------------------------
-
-// Parent defined the ID of the parent directory
-type Parent struct {
-	ID string `json:"id"`
+type SignPartRequest struct {
+	Key   string `json:"key"`
+	Parts []struct {
+		PartNumber int64 `json:"PartNumber"`
+	} `json:"parts"`
 }
 
-// UploadFile is the request for Upload File
-type UploadFile struct {
-	Name              string `json:"name"`
-	Parent            Parent `json:"parent"`
-	ContentCreatedAt  Time   `json:"content_created_at"`
-	ContentModifiedAt Time   `json:"content_modified_at"`
+type SignPartResponse []PartWithUrl
+
+type CompleteMultipartUpload struct {
+	Parts []Part `json:"parts"`
+	Key   string `json:"key"`
 }
 
-// UpdateFileMove is the request for Upload File to change name and parent
-type UpdateFileMove struct {
-	Name   string `json:"name"`
-	Parent Parent `json:"parent"`
-}
-
-// UploadSessionRequest is uses in Create Upload Session
-type UploadSessionRequest struct {
-	FolderID string `json:"folder_id,omitempty"` // don't pass for update
-	FileSize int64  `json:"file_size"`
-	FileName string `json:"file_name,omitempty"` // optional for update
-}
-
-// UploadSessionResponse is returned from Create Upload Session
-type UploadSessionResponse struct {
-	TotalParts       int   `json:"total_parts"`
-	PartSize         int64 `json:"part_size"`
-	SessionEndpoints struct {
-		ListParts  string `json:"list_parts"`
-		Commit     string `json:"commit"`
-		UploadPart string `json:"upload_part"`
-		Status     string `json:"status"`
-		Abort      string `json:"abort"`
-	} `json:"session_endpoints"`
-	SessionExpiresAt  Time   `json:"session_expires_at"`
-	ID                string `json:"id"`
-	Type              string `json:"type"`
-	NumPartsProcessed int    `json:"num_parts_processed"`
-}
-
-// Part defines the return from upload part call which are passed to commit upload also
-type Part struct {
-	PartID string `json:"part_id"`
-	Offset int64  `json:"offset"`
-	Size   int64  `json:"size"`
-	Sha1   string `json:"sha1"`
-}
-
-// UploadPartResponse is returned from the upload part call
-type UploadPartResponse struct {
-	Part Part `json:"part"`
-}
-
-// FileTreeChangeEventTypes are the events that can require cache invalidation
-var FileTreeChangeEventTypes = map[string]struct{}{
-	"ITEM_COPY":                 {},
-	"ITEM_CREATE":               {},
-	"ITEM_MAKE_CURRENT_VERSION": {},
-	"ITEM_MODIFY":               {},
-	"ITEM_MOVE":                 {},
-	"ITEM_RENAME":               {},
-	"ITEM_TRASH":                {},
-	"ITEM_UNDELETE_VIA_TRASH":   {},
-	"ITEM_UPLOAD":               {},
-}
-
-// Event is an array element in the response returned from /events
-type Event struct {
-	EventType string `json:"event_type"`
-	EventID   string `json:"event_id"`
-	Source    Item   `json:"source"`
-}
-
-// Events is returned from /events
-type Events struct {
-	ChunkSize          int64   `json:"chunk_size"`
-	Entries            []Event `json:"entries"`
-	NextStreamPosition int64   `json:"next_stream_position"`
+type CompleteMultipartUploadResponse struct {
+	Location string `json:"location"`
 }
