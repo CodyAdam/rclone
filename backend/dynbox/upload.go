@@ -40,10 +40,10 @@ func getChunkSize(size int64) int64 {
 }
 
 // uploadMultipart uploads a file using multipart upload
-func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, modTime time.Time, options ...fs.OpenOption) (err error) {
+func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, contentType string, modTime time.Time, hash string, options ...fs.OpenOption) (err error) {
 
 	// Create upload session
-	session, err := o.createUploadSession(ctx, leaf, directoryID, size, modTime)
+	session, err := o.createUploadSession(ctx, leaf, directoryID, size, contentType, modTime, hash)
 	if err != nil {
 		return fmt.Errorf("multipart upload create session failed: %w", err)
 	}
@@ -73,7 +73,7 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, direct
 	remaining := size
 	position := int64(0)
 	parts := make([]api.Part, totalParts)
-	hash := sha256.New()
+	verifHash := sha256.New()
 	errs := make(chan error, totalParts)
 	var wg sync.WaitGroup
 outer:
@@ -100,8 +100,8 @@ outer:
 			break outer
 		}
 
-		// Make the global hash (must be done sequentially)
-		_, _ = hash.Write(buf)
+		// Make the global verifHash (must be done sequentially)
+		_, _ = verifHash.Write(buf)
 
 		// Transfer the chunk
 		wg.Add(1)
@@ -135,39 +135,45 @@ outer:
 		return err
 	}
 
+	// Verify the hash matches
+	calculatedHash := fmt.Sprintf("%x", verifHash.Sum(nil))
+	if calculatedHash != hash {
+		return fmt.Errorf("multipart upload failed hash verification: expected %s got %s", hash, calculatedHash)
+	}
+
 	// Finalise the upload session
 	err = o.commitUpload(ctx, *session.MultipartUploadId, parts)
 	if err != nil {
 		return fmt.Errorf("multipart upload failed to finalize: %w", err)
 	}
 
-	return nil
+	return o.finishUpload(ctx, *session.Key)
 }
 
 // createUploadSession creates an upload session for the object
-func (o *Object) createUploadSession(ctx context.Context, leaf string, directoryID string, size int64, modTime time.Time) (uploadResp *api.UploadMultipartRequestResponse, err error) {
+func (o *Object) createUploadSession(ctx context.Context, leaf string, directoryID string, size int64, contentType string, modTime time.Time, hash string) (uploadResp *api.UploadMultipartRequestResponse, err error) {
 	var uploadReq interface{}
 	var endpoint string
 
 	if o.id != "" {
 		// Update existing file
 		uploadReq = api.RequestUploadUpdate{
-			Size:      size,
-			Type:      o.contentType,
-			Hash:      o.hash,
-			UpdatedAt: (*api.Time)(&modTime),
+			Size:    size,
+			Type:    contentType,
+			Hash:    hash,
+			ModTime: api.Time(modTime),
 		}
 		endpoint = "/fs/files/" + o.id + "/upload/multipart"
 	} else {
 		// Create new file
 		uploadReq = api.RequestUploadCreate{
-			Name:      o.fs.opt.Enc.FromStandardName(leaf),
-			Size:      size,
-			Type:      o.contentType,
-			VaultID:   o.fs.opt.VaultID,
-			Hash:      o.hash,
-			CreatedAt: (*api.Time)(&modTime),
-			ParentID:  &directoryID,
+			Name:     o.fs.opt.Enc.FromStandardName(leaf),
+			Size:     size,
+			Type:     contentType,
+			VaultID:  o.fs.opt.VaultID,
+			Hash:     hash,
+			ModTime:  api.Time(modTime),
+			ParentID: &directoryID,
 		}
 		endpoint = "/fs/files/upload/multipart"
 	}

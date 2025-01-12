@@ -31,11 +31,11 @@ func (t *Time) UnmarshalJSON(data []byte) error {
 	return nil
 }
 
-// Error is returned from box when things go wrong
+// Error is returned from dynbox when things go wrong
 type Error struct {
-	Status  int    `json:"status"`
 	Code    string `json:"code"`
 	Message string `json:"message"`
+	Status  int    `json:"status"`
 }
 
 // Error returns a string for the error and satisfies the error interface
@@ -70,6 +70,7 @@ type FileItem struct {
 	Path             string  `json:"path"`
 	Hash             string  `json:"hash"`
 	Key              string  `json:"key"`
+	RawModTime       Time    `json:"modTime"`
 }
 
 type FolderItem struct {
@@ -77,18 +78,21 @@ type FolderItem struct {
 	ParentID *string `json:"parentId,omitempty"` // null if root
 }
 
-// ModTime returns the modification time of the item
-func (i *Item) ModTime() (t time.Time) {
-	t = time.Time(i.UpdatedAt)
-	if t.IsZero() {
-		t = time.Time(i.CreatedAt)
-	}
-	return t
+type RequestUploadFinished struct {
+	Key string `json:"key"`
 }
 
 // IsDeleted returns true if the item is deleted
 func (i *Item) IsDeleted() bool {
 	return i.DeletedAt != nil
+}
+
+func (i *FileItem) ModTime() (t time.Time) {
+	return time.Time(i.RawModTime)
+}
+
+func (i *Item) UpdateTime() (t time.Time) {
+	return time.Time(i.UpdatedAt)
 }
 
 type Vault struct {
@@ -153,12 +157,21 @@ type PreUploadCheck struct {
 	VaultID  string  `json:"vaultId"`
 }
 
+type PreUploadCheckResponse struct {
+	CanUpload      bool    `json:"canUpload"`
+	ExistingFileID *string `json:"existingFileId,omitempty"`
+}
+
+type DeleteFile struct {
+	Permanent bool `json:"permanent"`
+}
+
 // PurgeCheck is the request for Purge Check
 type PurgeCheck struct {
 	FolderID  *string `json:"folderId"`
 	VaultID   string  `json:"vaultId"`
-	Permanent bool    `json:"permanent,omitempty"`
-	Recursive bool    `json:"recursive,omitempty"`
+	Permanent bool    `json:"permanent"`
+	Recursive bool    `json:"recursive"`
 }
 
 // CopyFile is the request for Copy File
@@ -176,16 +189,16 @@ type Move struct {
 
 // UpdateFileMetadata is used in Update File Info
 type UpdateFileMetadata struct {
-	UpdatedAt Time `json:"updatedAt"`
+	ModTime Time `json:"modTime"`
 }
 
 // --- single upload ---
 
 type RequestUploadUpdate struct {
-	Size      int64  `json:"size"`
-	Type      string `json:"type"`
-	Hash      string `json:"hash"`
-	UpdatedAt *Time  `json:"updatedAt,omitempty"`
+	Size    int64  `json:"size"`
+	Type    string `json:"type"`
+	Hash    string `json:"hash"`
+	ModTime Time   `json:"modTime"`
 }
 
 type RequestUploadCreate struct {
@@ -194,8 +207,10 @@ type RequestUploadCreate struct {
 	Type      string  `json:"type"`
 	VaultID   string  `json:"vaultId"`
 	Hash      string  `json:"hash"`
+	ModTime   Time    `json:"modTime"`
 	CreatedAt *Time   `json:"createdAt,omitempty"`
 	ParentID  *string `json:"parentId,omitempty"` // null if root
+
 }
 
 type UploadRequestResponse struct {
@@ -203,13 +218,48 @@ type UploadRequestResponse struct {
 	Key       *string `json:"key"`
 }
 
+// --- multipart upload ---
 type UploadMultipartRequestResponse struct {
 	MultipartUploadId *string `json:"multipartUploadId"`
 	Key               *string `json:"key"`
 }
-
 type UploadAbortRequest struct {
 	Key string `json:"key"`
+}
+
+type ListPartsRequest struct {
+	Key string `json:"key"`
+}
+
+type ListPartsResponse []Part
+
+type Part struct {
+	PartNumber int64  `json:"partNumber"`
+	ETag       string `json:"ETag,omitempty"`
+	Size       int64  `json:"Size,omitempty"`
+}
+
+type PartWithUrl struct {
+	Part
+	UploadUrl string `json:"uploadUrl"`
+}
+
+type SignPartRequest struct {
+	Key   string `json:"key"`
+	Parts []struct {
+		PartNumber int64 `json:"PartNumber"`
+	} `json:"parts"`
+}
+
+type SignPartResponse []PartWithUrl
+
+type CompleteMultipartUpload struct {
+	Parts []Part `json:"parts"`
+	Key   string `json:"key"`
+}
+
+type CompleteMultipartUploadResponse struct {
+	Location string `json:"location"`
 }
 
 // --- events ---
@@ -275,41 +325,4 @@ type Events struct {
 	HasMore     bool    `json:"hasMore"`
 	Events      []Event `json:"events"`
 	NewPosition Time    `json:"newPosition"`
-}
-
-// --- multipart upload ---
-
-type ListPartsRequest struct {
-	Key string `json:"key"`
-}
-
-type ListPartsResponse []Part
-
-type Part struct {
-	PartNumber int64  `json:"partNumber"`
-	ETag       string `json:"ETag,omitempty"`
-	Size       int64  `json:"Size,omitempty"`
-}
-
-type PartWithUrl struct {
-	Part
-	UploadUrl string `json:"uploadUrl"`
-}
-
-type SignPartRequest struct {
-	Key   string `json:"key"`
-	Parts []struct {
-		PartNumber int64 `json:"PartNumber"`
-	} `json:"parts"`
-}
-
-type SignPartResponse []PartWithUrl
-
-type CompleteMultipartUpload struct {
-	Parts []Part `json:"parts"`
-	Key   string `json:"key"`
-}
-
-type CompleteMultipartUploadResponse struct {
-	Location string `json:"location"`
 }

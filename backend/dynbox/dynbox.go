@@ -1,6 +1,7 @@
 package dynbox
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -79,6 +80,8 @@ func init() {
 					encoder.EncodeQuestion |
 					encoder.EncodeRightSpace |
 					encoder.EncodeRightPeriod |
+					encoder.EncodeLeftSpace |
+					encoder.EncodeRightSpace |
 					encoder.EncodeInvalidUtf8),
 			}},
 	})
@@ -143,7 +146,7 @@ func (f *Fs) Features() *fs.Features {
 
 // Precision of the ModTimes in this Fs
 func (f *Fs) Precision() time.Duration {
-	return time.Millisecond
+	return time.Second
 }
 
 // Hashes returns the supported hash types of the filesystem
@@ -192,6 +195,63 @@ func errorHandler(resp *http.Response) error {
 		errResponse.Status = resp.StatusCode
 	}
 	return errResponse
+}
+
+// encodePathSegment encodes a filename using URL encoding
+// This replaces special characters with percent-encoded values
+func (f *Fs) encodePathSegment(name string) string {
+	return url.PathEscape(name)
+}
+
+// decodePathSegment decodes a URL-encoded filename back to its original form
+// This converts percent-encoded values back to original characters
+func (f *Fs) decodePathSegment(encodedName string) (string, error) {
+	// Use the standard url package's PathUnescape
+	decoded, err := url.PathUnescape(encodedName)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode filename %q: %w", encodedName, err)
+	}
+	return decoded, nil
+}
+
+// decodePath decodes each segment of a path that is URL encoded
+// It splits the path by '/', decodes each segment, and rejoins with '/'
+func (f *Fs) decodePath(encodedPath string) (string, error) {
+	// Split path into segments
+	segments := strings.Split(encodedPath, "/")
+
+	// Decode each segment
+	for i, segment := range segments {
+		if segment == "" {
+			continue
+		}
+		decoded, err := f.decodePathSegment(segment)
+		if err != nil {
+			return "", fmt.Errorf("failed to decode path segment %q: %w", segment, err)
+		}
+		segments[i] = decoded
+	}
+
+	// Rejoin segments with /
+	return strings.Join(segments, "/"), nil
+}
+
+// encodePath encodes each segment of a path using URL encoding
+// It splits the path by '/', encodes each segment, and rejoins with '/'
+func (f *Fs) encodePath(path string) string {
+	// Split path into segments
+	segments := strings.Split(path, "/")
+
+	// Encode each segment
+	for i, segment := range segments {
+		if segment == "" {
+			continue
+		}
+		segments[i] = f.encodePathSegment(segment)
+	}
+
+	// Rejoin segments with /
+	return strings.Join(segments, "/")
 }
 
 // NewFs constructs an Fs from the path, container:path
@@ -360,17 +420,32 @@ func (f *Fs) newObjectWithInfo(ctx context.Context, remote string, info *api.Fil
 
 // readMetaDataForPath reads the metadata from the path
 func (f *Fs) readMetaDataForPath(ctx context.Context, path string) (info *api.FileItem, err error) {
-	opts := rest.Opts{
-		Method: "POST",
-		Path:   "/fs/files",
+	// defer log.Trace(f, "path=%q", path)("info=%+v, err=%v", &info, &err)
+	leaf, directoryID, err := f.dirCache.FindPath(ctx, path, false)
+	if err != nil {
+		if err == fs.ErrorDirNotFound {
+			return nil, fs.ErrorObjectNotFound
+		}
+		return nil, err
 	}
-	input := api.GetMetadataFromPath{
-		FilePath: path,
-		VaultID:  f.opt.VaultID,
+
+	// Use preupload to find the ID
+	fileID, err := f.preUploadCheck(ctx, leaf, directoryID, -1)
+	if err != nil {
+		return nil, err
+	}
+	if fileID == nil {
+		return nil, fs.ErrorObjectNotFound
+	}
+
+	// Now we have the ID we can look up the object proper
+	opts := rest.Opts{
+		Method: "GET",
+		Path:   "/fs/files/" + *fileID,
 	}
 	var item api.FileItem
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.CallJSON(ctx, &opts, &input, &item)
+		resp, err := f.srv.CallJSON(ctx, &opts, nil, &item)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
@@ -408,8 +483,7 @@ func (f *Fs) listAll(ctx context.Context, dirID string, directoriesOnly bool, fi
 		Method: "GET",
 		Path:   "/fs/folders/" + dirID + "/items",
 		Parameters: url.Values{
-			"folderId": []string{dirID},
-			"vaultId":  []string{f.opt.VaultID},
+			"vaultId": []string{f.opt.VaultID},
 		},
 	}
 
@@ -472,13 +546,16 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 	}
 	var iErr error
 	_, err = f.listAll(ctx, directoryID, false, false, true, func(file *api.FileItem, folder *api.FolderItem) bool {
-		remote := path.Join(dir, file.Name)
-		if folder != nil {
+		var remote string
+		switch {
+		case folder != nil:
+			remote = path.Join(dir, folder.Name)
 			// cache the directory ID for later lookups
 			f.dirCache.Put(remote, folder.ID)
-			d := fs.NewDir(remote, folder.ModTime()).SetID(folder.ID)
+			d := fs.NewDir(remote, folder.UpdateTime()).SetID(folder.ID)
 			entries = append(entries, d)
-		} else if file != nil {
+		case file != nil:
+			remote = path.Join(dir, file.Name)
 			// Create a file object (or update it)
 			o, err := f.newObjectWithInfo(ctx, remote, file)
 			if err != nil {
@@ -500,9 +577,9 @@ func (f *Fs) List(ctx context.Context, dir string) (entries fs.DirEntries, err e
 
 // preUploadCheck checks to see if a file can be uploaded
 //
-// It returns "", nil if the file is good to go
-// It returns "ID", nil if the file must be updated
-func (f *Fs) preUploadCheck(ctx context.Context, leaf, directoryID string, size int64) (item *api.FileItem, err error) {
+// It returns nil, nil if the file is good to go
+// It returns FileItem, nil if the file must be updated
+func (f *Fs) preUploadCheck(ctx context.Context, leaf, directoryID string, size int64) (item *string, err error) {
 	check := api.PreUploadCheck{
 		Name:     f.opt.Enc.FromStandardName(leaf),
 		FolderID: &directoryID,
@@ -513,7 +590,7 @@ func (f *Fs) preUploadCheck(ctx context.Context, leaf, directoryID string, size 
 		Method: "OPTIONS",
 		Path:   "/fs/files/upload",
 	}
-	var result *api.FileItem
+	var result *api.PreUploadCheckResponse
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
 		resp, err = f.srv.CallJSON(ctx, &opts, &check, &result)
@@ -522,7 +599,7 @@ func (f *Fs) preUploadCheck(ctx context.Context, leaf, directoryID string, size 
 	if err != nil {
 		return nil, err
 	}
-	return result, nil
+	return result.ExistingFileID, nil
 }
 
 // Put the object
@@ -543,19 +620,19 @@ func (f *Fs) Put(ctx context.Context, in io.Reader, src fs.ObjectInfo, options .
 
 	// Preflight check the upload, which returns the ID if the
 	// object already exists
-	item, err := f.preUploadCheck(ctx, leaf, directoryID, src.Size())
+	fileID, err := f.preUploadCheck(ctx, leaf, directoryID, src.Size())
 	if err != nil {
 		return nil, err
 	}
-	if item == nil {
+	if fileID == nil {
 		return f.PutUnchecked(ctx, in, src, options...)
 	}
 
-	// If object exists then create a skeleton one with just id
+	// If object exists then create a skeleton one with just id, size, hash, type
 	o := &Object{
 		fs:     f,
 		remote: remote,
-		id:     item.ID,
+		id:     *fileID,
 	}
 	return o, o.Update(ctx, in, src, options...)
 }
@@ -614,8 +691,11 @@ func (f *Fs) deleteObject(ctx context.Context, id string) error {
 		Path:       "/fs/files/" + id,
 		NoResponse: true,
 	}
+	input := api.DeleteFile{
+		Permanent: false,
+	}
 	return f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.Call(ctx, &opts)
+		resp, err := f.srv.CallJSON(ctx, &opts, &input, nil)
 		return shouldRetry(ctx, resp, err)
 	})
 }
@@ -635,13 +715,14 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 
 	opts := rest.Opts{
 		Method:     "DELETE",
-		Path:       "/folders/" + rootID,
+		Path:       "/fs/folders/" + rootID,
 		NoResponse: true,
 	}
 	input := api.PurgeCheck{
 		FolderID:  &rootID,
 		VaultID:   f.opt.VaultID,
 		Recursive: !check,
+		Permanent: false,
 	}
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
@@ -698,11 +779,11 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 	}
 
 	// check if dest already exists
-	item, err := f.preUploadCheck(ctx, leaf, directoryID, src.Size())
+	fileID, err := f.preUploadCheck(ctx, leaf, directoryID, src.Size())
 	if err != nil {
 		return nil, err
 	}
-	if item != nil { // dest already exists, need to copy to temp name and then move
+	if fileID != nil { // dest already exists, need to copy to temp name and then move
 		tempSuffix := "-rclone-copy-" + random.String(8)
 		fs.Debugf(remote, "dst already exists, copying to temp name %v", remote+tempSuffix)
 		tempObj, err := f.Copy(ctx, src, remote+tempSuffix)
@@ -710,7 +791,7 @@ func (f *Fs) Copy(ctx context.Context, src fs.Object, remote string) (fs.Object,
 			return nil, err
 		}
 		fs.Debugf(remote+tempSuffix, "moving to real name %v", remote)
-		err = f.deleteObject(ctx, item.ID)
+		err = f.deleteObject(ctx, *fileID)
 		if err != nil {
 			return nil, err
 		}
@@ -845,7 +926,7 @@ func (f *Fs) move(ctx context.Context, isFile bool, id, leaf, directoryID string
 			if isFile {
 				return nil, fs.ErrorCantMove
 			}
-			return nil, fs.ErrorCantMove
+			return nil, fs.ErrorCantDirMove
 		}
 		return nil, err
 	}
@@ -1058,12 +1139,22 @@ func (f *Fs) getPathsFromEventData(event api.Event) []string {
 
 	// Always check current path if available
 	if event.Data.Path != "" {
-		paths = append(paths, event.Data.Path)
+		decodedPath, err := f.decodePath(event.Data.Path)
+		if err != nil {
+			fs.Debugf(f, "Failed to decode path %q: %v", event.Data.Path, err)
+		} else {
+			paths = append(paths, decodedPath)
+		}
 	}
 
 	// For operations like move/rename, also check the previous path
 	if event.Data.PreviousPath != "" {
-		paths = append(paths, event.Data.PreviousPath)
+		decodedPath, err := f.decodePath(event.Data.PreviousPath)
+		if err != nil {
+			fs.Debugf(f, "Failed to decode previous path %q: %v", event.Data.PreviousPath, err)
+		} else {
+			paths = append(paths, decodedPath)
+		}
 	}
 
 	return paths
@@ -1095,7 +1186,7 @@ func (o *Object) Remote() string {
 	return o.remote
 }
 
-// Hash returns the SHA-1 of an object returning a lowercase hex string
+// Hash returns the SHA-256 of an object returning a lowercase hex string
 func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
 	if t != hash.SHA256 {
 		return "", hash.ErrUnsupported
@@ -1135,7 +1226,7 @@ func (o *Object) readMetaData(ctx context.Context) (err error) {
 	info, err := o.fs.readMetaDataForPath(ctx, o.remote)
 	if err != nil {
 		if apiErr, ok := err.(*api.Error); ok {
-			if apiErr.Code == "not_found" || apiErr.Code == "trashed" {
+			if apiErr.Code == "NOT_FOUND" {
 				return fs.ErrorObjectNotFound
 			}
 		}
@@ -1164,7 +1255,7 @@ func (o *Object) setModTime(ctx context.Context, modTime time.Time) (*api.FileIt
 		Path:   "/fs/files/" + o.id,
 	}
 	update := api.UpdateFileMetadata{
-		UpdatedAt: api.Time(modTime),
+		ModTime: api.Time(modTime),
 	}
 	var info *api.FileItem
 	err := o.fs.pacer.Call(func() (bool, error) {
@@ -1197,7 +1288,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	var resp *http.Response
 	opts := rest.Opts{
 		Method:  "GET",
-		Path:    "/files/" + o.id + "/content",
+		Path:    "/fs/files/" + o.id + "/content",
 		Options: options,
 	}
 	err = o.fs.pacer.Call(func() (bool, error) {
@@ -1210,6 +1301,25 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	return resp.Body, err
 }
 
+// generateContentHash generates the SHA-256 hash of the object's content before uploading
+func (o *Object) generateContentHash(in io.Reader) (string, error) {
+	// Create a new SHA-256 hasher
+	hasher, err := hash.NewMultiHasherTypes(hash.NewHashSet(hash.SHA256))
+	if err != nil {
+		return "", err
+	}
+
+	// Copy the input to the hasher
+	_, err = io.Copy(hasher, in)
+	if err != nil {
+		return "", err
+	}
+
+	// Get the hash as a hex string
+	sums := hasher.Sums()
+	return sums[hash.SHA256], nil
+}
+
 // Update the object with the contents of the io.Reader, modTime and size
 //
 // If existing is set then it updates the object rather than creating a new one.
@@ -1217,6 +1327,7 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 // The new object may have been created if an error is returned.
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	size := src.Size()
+	contentType := fs.MimeType(ctx, src)
 	modTime := src.ModTime(ctx)
 	remote := o.Remote()
 
@@ -1226,11 +1337,26 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		return err
 	}
 
+	// Read all content first since we need to use it twice
+	// (once for hash verification and once for upload)
+	allBytes, err := io.ReadAll(in)
+	if err != nil {
+		return fmt.Errorf("failed to read upload content: %w", err)
+	}
+
+	// First pass: verify hash
+	hashReader := bytes.NewReader(allBytes)
+	hash, err := o.generateContentHash(hashReader)
+	if err != nil {
+		return err
+	}
+
+	contentReader := bytes.NewReader(allBytes)
 	// Upload with simple or multipart
-	if size <= int64(o.fs.opt.UploadCutoff) {
-		err = o.upload(ctx, in, leaf, directoryID, modTime, options...)
+	if o.size <= int64(o.fs.opt.UploadCutoff) {
+		err = o.upload(ctx, contentReader, leaf, directoryID, size, contentType, modTime, hash, options...)
 	} else {
-		err = o.uploadMultipart(ctx, in, leaf, directoryID, size, modTime, options...)
+		err = o.uploadMultipart(ctx, contentReader, leaf, directoryID, size, contentType, modTime, hash, options...)
 	}
 	return err
 }
@@ -1238,29 +1364,29 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 // upload does a single non-multipart upload
 //
 // This is recommended for less than 50 MiB of content
-func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID string, modTime time.Time, options ...fs.OpenOption) (err error) {
+func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, contentType string, modTime time.Time, hash string, options ...fs.OpenOption) (err error) {
 	var uploadReq interface{}
 	var endpoint string
 
 	if o.id != "" {
 		// Update existing file
 		uploadReq = api.RequestUploadUpdate{
-			Size:      o.size,
-			Type:      o.contentType,
-			Hash:      o.hash,
-			UpdatedAt: (*api.Time)(&modTime),
+			Size:    size,
+			Type:    contentType,
+			Hash:    hash,
+			ModTime: api.Time(modTime),
 		}
 		endpoint = "/fs/files/" + o.id + "/upload/single"
 	} else {
 		// Create new file
 		uploadReq = api.RequestUploadCreate{
-			Name:      o.fs.opt.Enc.FromStandardName(leaf),
-			Size:      o.size,
-			Type:      o.contentType,
-			VaultID:   o.fs.opt.VaultID,
-			Hash:      o.hash,
-			CreatedAt: (*api.Time)(&modTime),
-			ParentID:  &directoryID,
+			Name:     o.fs.opt.Enc.FromStandardName(leaf),
+			Size:     size,
+			Type:     contentType,
+			VaultID:  o.fs.opt.VaultID,
+			Hash:     hash,
+			ModTime:  api.Time(modTime),
+			ParentID: &directoryID,
 		}
 		endpoint = "/fs/files/upload/single"
 	}
@@ -1286,10 +1412,11 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 
 	// Upload the file to the provided signed URL
 	opts = rest.Opts{
-		Method:  "PUT",
-		RootURL: *uploadResp.UploadUrl,
-		Body:    in,
-		Options: options,
+		Method:        "PUT",
+		RootURL:       *uploadResp.UploadUrl,
+		Body:          in,
+		ContentLength: &size, // Add explicit content length
+		Options:       options,
 	}
 
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
@@ -1300,7 +1427,28 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 		return err
 	}
 
-	return nil
+	return o.finishUpload(ctx, *uploadResp.Key)
+}
+
+// finishUpload finalises the upload and update the metadata of the object
+func (o *Object) finishUpload(ctx context.Context, key string) (err error) {
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   "/fs/files/upload/finished",
+	}
+	input := api.RequestUploadFinished{
+		Key: key,
+	}
+	var result *api.FileItem
+	var resp *http.Response
+	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
+		resp, err = o.fs.srv.CallJSON(ctx, &opts, &input, &result)
+		return shouldRetry(ctx, resp, err)
+	})
+	if err != nil {
+		return err
+	}
+	return o.setMetaData(result)
 }
 
 // Remove an object
