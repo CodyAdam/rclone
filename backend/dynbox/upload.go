@@ -204,11 +204,14 @@ func (o *Object) uploadPart(ctx context.Context, SessionID string, partNumber in
 		Options: options,
 	}
 
+	chunkSize := int64(len(chunk))
+
 	signRequest := api.SignPartRequest{
 		Key: o.id,
 		Parts: []struct {
 			PartNumber int64 `json:"PartNumber"`
-		}{{PartNumber: partNumber}},
+			Size       int64 `json:"Size"`
+		}{{PartNumber: partNumber, Size: chunkSize}},
 	}
 
 	var signResponse api.SignPartResponse
@@ -225,7 +228,6 @@ func (o *Object) uploadPart(ctx context.Context, SessionID string, partNumber in
 	}
 
 	// Upload the part using the presigned URL
-	chunkSize := int64(len(chunk))
 	presignedURL := signResponse[0].UploadUrl
 	req, err := http.NewRequestWithContext(ctx, "PUT", presignedURL, wrap(bytes.NewReader(chunk)))
 	if err != nil {

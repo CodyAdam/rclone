@@ -7,7 +7,7 @@ import (
 )
 
 const (
-	// 2017-05-03T07:26:10-07:00
+	// 2025-01-13T13:04:21.939Z
 	timeFormat = `"` + time.RFC3339 + `"`
 )
 
@@ -15,10 +15,10 @@ const (
 // box API, by using RFC3339
 type Time time.Time
 
-// MarshalJSON turns a Time into JSON as Unix epoch milliseconds
-func (t *Time) MarshalJSON() (out []byte, err error) {
-	epochMs := (*time.Time)(t).UnixNano() / int64(time.Millisecond)
-	return []byte(fmt.Sprintf("%d", epochMs)), nil
+// MarshalJSON turns a Time into JSON as RFC3339
+func (t Time) MarshalJSON() (out []byte, err error) {
+	timeString := time.Time(t).Format(timeFormat)
+	return []byte(timeString), nil
 }
 
 // UnmarshalJSON turns JSON into a Time
@@ -102,11 +102,11 @@ type Vault struct {
 // Usage is returned from Get Usage
 type Usage struct {
 	Vault struct {
-		Plan              string    `json:"plan"`
-		MemberCount       int64     `json:"memberCount"`
-		TagCount          int64     `json:"tagCount"`
-		ViewCount         int64     `json:"viewCount"`
-		BillingCycleStart time.Time `json:"billingCycleStart"`
+		Plan              string `json:"plan"`
+		MemberCount       int64  `json:"memberCount"`
+		TagCount          int64  `json:"tagCount"`
+		ViewCount         int64  `json:"viewCount"`
+		BillingCycleStart int64  `json:"billingCycleStart"`
 	} `json:"vault"`
 	AI struct {
 		Used  int64 `json:"used"`
@@ -210,7 +210,6 @@ type RequestUploadCreate struct {
 	ModTime   Time    `json:"modTime"`
 	CreatedAt *Time   `json:"createdAt,omitempty"`
 	ParentID  *string `json:"parentId,omitempty"` // null if root
-
 }
 
 type UploadRequestResponse struct {
@@ -248,6 +247,7 @@ type SignPartRequest struct {
 	Key   string `json:"key"`
 	Parts []struct {
 		PartNumber int64 `json:"PartNumber"`
+		Size       int64 `json:"Size"`
 	} `json:"parts"`
 }
 

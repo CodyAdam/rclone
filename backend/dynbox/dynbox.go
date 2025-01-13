@@ -43,7 +43,10 @@ func init() {
 		Name:        "dynbox",
 		Description: "Dynbox",
 		NewFs:       NewFs,
-		Config:      nil,
+		MetadataInfo: &fs.MetadataInfo{
+			Help: `For now, file metadata are not supported.`,
+		},
+		Config: nil,
 		Options: []fs.Option{{
 			Name:      "vault_id",
 			Help:      "The vault ID to access",
@@ -275,9 +278,8 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	f.features = (&fs.Features{
 		ReadMimeType:            true,
 		PartialUploads:          true,
-		ReadMetadata:            true,
+		WriteMimeType:           true,
 		UserMetadata:            true,
-		ReadDirMetadata:         true,
 		CanHaveEmptyDirectories: true,
 	}).Fill(ctx, f)
 
@@ -342,7 +344,7 @@ func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 		Method: "GET",
 		Path:   "/fs/usage",
 		Parameters: url.Values{
-			"vault_id": []string{f.opt.VaultID},
+			"vaultId": []string{f.opt.VaultID},
 		},
 	}
 	var data api.Usage
@@ -903,12 +905,12 @@ func (f *Fs) move(ctx context.Context, isFile bool, id, leaf, directoryID string
 	// Move the object
 	var endpoint string
 	if isFile {
-		endpoint = "/fs/files/" + id
+		endpoint = "/fs/files/" + id + "/move"
 	} else {
-		endpoint = "/fs/folders/" + id
+		endpoint = "/fs/folders/" + id + "/move"
 	}
 	opts := rest.Opts{
-		Method: "PUT",
+		Method: "POST",
 		Path:   endpoint,
 	}
 	move := api.Move{
@@ -1137,24 +1139,29 @@ func (f *Fs) changeNotifyRunner(ctx context.Context, notifyFunc func(string, fs.
 func (f *Fs) getPathsFromEventData(event api.Event) []string {
 	var paths []string
 
-	// Always check current path if available
-	if event.Data.Path != "" {
-		decodedPath, err := f.decodePath(event.Data.Path)
+	// Helper function to process a path
+	processPath := func(path string) {
+		decodedPath, err := f.decodePath(path)
 		if err != nil {
-			fs.Debugf(f, "Failed to decode path %q: %v", event.Data.Path, err)
-		} else {
-			paths = append(paths, decodedPath)
+			fs.Debugf(f, "Failed to decode path %q: %v", path, err)
+			return
 		}
+		// Remove leading slash if present
+		relativePath := strings.TrimPrefix(decodedPath, "/")
+		// Convert absolute path to relative path by removing remote root prefix
+		relativePath = strings.TrimPrefix(relativePath, f.root)
+		relativePath = strings.TrimPrefix(relativePath, "/")
+		paths = append(paths, relativePath)
 	}
 
-	// For operations like move/rename, also check the previous path
+	// Process current path if available
+	if event.Data.Path != "" {
+		processPath(event.Data.Path)
+	}
+
+	// Process previous path for operations like move/rename
 	if event.Data.PreviousPath != "" {
-		decodedPath, err := f.decodePath(event.Data.PreviousPath)
-		if err != nil {
-			fs.Debugf(f, "Failed to decode previous path %q: %v", event.Data.PreviousPath, err)
-		} else {
-			paths = append(paths, decodedPath)
-		}
+		processPath(event.Data.PreviousPath)
 	}
 
 	return paths
@@ -1267,6 +1274,12 @@ func (o *Object) setModTime(ctx context.Context, modTime time.Time) (*api.FileIt
 
 // SetModTime sets the modification time of the local fs object
 func (o *Object) SetModTime(ctx context.Context, modTime time.Time) error {
+	if !o.hasMetaData {
+		err := o.readMetaData(ctx)
+		if err != nil {
+			return err
+		}
+	}
 	info, err := o.setModTime(ctx, modTime)
 	if err != nil {
 		return err
@@ -1391,6 +1404,8 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 		endpoint = "/fs/files/upload/single"
 	}
 
+	fs.Debugf(o, "modTime: %v", modTime)
+
 	var resp *http.Response
 	var uploadResp api.UploadRequestResponse
 	opts := rest.Opts{
@@ -1461,6 +1476,11 @@ func (o *Object) ID() string {
 	return o.id
 }
 
+// get object mime type
+func (o *Object) MimeType(ctx context.Context) string {
+	return o.contentType
+}
+
 // Check the interfaces are satisfied
 var (
 	_ fs.Fs              = (*Fs)(nil)
@@ -1473,5 +1493,6 @@ var (
 	// _ fs.PublicLinker    = (*Fs)(nil)
 	_ fs.CleanUpper = (*Fs)(nil)
 	_ fs.Object     = (*Object)(nil)
+	_ fs.MimeTyper  = (*Object)(nil)
 	_ fs.IDer       = (*Object)(nil)
 )
