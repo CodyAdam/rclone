@@ -30,8 +30,8 @@ import (
 const (
 	minSleep               = 10 * time.Millisecond
 	maxSleep               = 2 * time.Second
-	decayConstant          = 2                // bigger for slower decay, exponential
-	defaultUploadCutoff    = 50 * 1024 * 1024 // 50MB
+	decayConstant          = 2                           // bigger for slower decay, exponential
+	uploadCutoff           = fs.SizeSuffix(50 * fs.Mebi) // bytes treshold for multipart upload
 	accessCookieName       = "authjs.session-token"
 	accessCookieNameSecure = "__Secure-authjs.session-token"
 	rootID                 = "root"
@@ -57,11 +57,6 @@ func init() {
 			Help:      "Access token for authentication",
 			Required:  true,
 			Sensitive: true,
-		}, {
-			Name:     "upload_cutoff",
-			Help:     "Cutoff for switching to multipart upload (>= 50 MiB).",
-			Default:  fs.SizeSuffix(defaultUploadCutoff),
-			Advanced: true,
 		}, {
 			Name:     "endpoint",
 			Help:     "API endpoint",
@@ -91,11 +86,10 @@ func init() {
 
 // Options defines the configuration for this backend
 type Options struct {
-	VaultID      string               `config:"vault_id"`
-	AccessToken  string               `config:"access_token"`
-	UploadCutoff fs.SizeSuffix        `config:"upload_cutoff"`
-	Endpoint     string               `config:"endpoint"`
-	Enc          encoder.MultiEncoder `config:"encoding"`
+	VaultID     string               `config:"vault_id"`
+	AccessToken string               `config:"access_token"`
+	Endpoint    string               `config:"endpoint"`
+	Enc         encoder.MultiEncoder `config:"encoding"`
 }
 
 // Fs represents a remote box
@@ -1369,7 +1363,7 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 
 	contentReader := bytes.NewReader(allBytes)
 	// Upload with simple or multipart
-	if o.size <= int64(o.fs.opt.UploadCutoff) {
+	if o.size <= int64(uploadCutoff) {
 		err = o.upload(ctx, contentReader, leaf, directoryID, size, contentType, modTime, hash, options...)
 	} else {
 		err = o.uploadMultipart(ctx, contentReader, leaf, directoryID, size, contentType, modTime, hash, options...)
@@ -1381,30 +1375,15 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 //
 // This is recommended for less than 50 MiB of content
 func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, contentType string, modTime time.Time, hash string, options ...fs.OpenOption) (err error) {
-	var uploadReq interface{}
-	var endpoint string
-
-	if o.id != "" {
-		// Update existing file
-		uploadReq = api.RequestUploadUpdate{
-			Size:    size,
-			Type:    contentType,
-			Hash:    hash,
-			ModTime: api.Time(modTime),
-		}
-		endpoint = "/fs/files/" + o.id + "/upload/single"
-	} else {
-		// Create new file
-		uploadReq = api.RequestUploadCreate{
-			Name:     o.fs.opt.Enc.FromStandardName(leaf),
-			Size:     size,
-			Type:     contentType,
-			VaultID:  o.fs.opt.VaultID,
-			Hash:     hash,
-			ModTime:  api.Time(modTime),
-			ParentID: &directoryID,
-		}
-		endpoint = "/fs/files/upload/single"
+	// Create new file
+	uploadReq := api.RequestUploadCreate{
+		Name:     o.fs.opt.Enc.FromStandardName(leaf),
+		Size:     size,
+		Type:     contentType,
+		VaultID:  o.fs.opt.VaultID,
+		Hash:     hash,
+		ModTime:  api.Time(modTime),
+		ParentID: &directoryID,
 	}
 
 	fs.Debugf(o, "modTime: %v", modTime)
@@ -1413,7 +1392,7 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 	var uploadResp api.UploadRequestResponse
 	opts := rest.Opts{
 		Method: "POST",
-		Path:   endpoint,
+		Path:   "/fs/files/upload/single",
 	}
 
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
@@ -1425,7 +1404,7 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 	}
 	if uploadResp.UploadUrl == nil {
 		// No upload needed - file was cached
-		return nil
+		return o.readMetaData(ctx)
 	}
 
 	// Upload the file to the provided signed URL
@@ -1445,7 +1424,7 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 		return err
 	}
 
-	return o.finishUpload(ctx, *uploadResp.Key)
+	return o.finishUpload(ctx, uploadResp.Key)
 }
 
 // finishUpload finalises the upload and update the metadata of the object

@@ -49,7 +49,7 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, direct
 	}
 	if session.MultipartUploadId == nil {
 		// No upload needed - file was cached
-		return nil
+		return o.readMetaData(ctx)
 	}
 
 	chunkSize := getChunkSize(size)
@@ -59,7 +59,7 @@ func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, direct
 	// Cancel the session if something went wrong
 	defer atexit.OnError(&err, func() {
 		fs.Debugf(o, "Cancelling multipart upload: %v", err)
-		cancelErr := o.abortUpload(ctx, *session.MultipartUploadId, *session.Key)
+		cancelErr := o.abortUpload(ctx, *session.MultipartUploadId, session.Key)
 		if cancelErr != nil {
 			fs.Logf(o, "Failed to cancel multipart upload: %v", cancelErr)
 		}
@@ -108,7 +108,7 @@ outer:
 		go func(part int64, position int64) {
 			defer wg.Done()
 			fs.Debugf(o, "Uploading part %d/%d offset %v/%v part size %v", part+1, totalParts, fs.SizeSuffix(position), fs.SizeSuffix(size), fs.SizeSuffix(chunkSize))
-			partResponse, err := o.uploadPart(ctx, *session.MultipartUploadId, part+1, buf, wrap, options...)
+			partResponse, err := o.uploadPart(ctx, session, part+1, buf, wrap, options...)
 			if err != nil {
 				err = fmt.Errorf("multipart upload failed to upload part: %w", err)
 				select {
@@ -142,48 +142,33 @@ outer:
 	}
 
 	// Finalise the upload session
-	err = o.commitUpload(ctx, *session.MultipartUploadId, parts)
+	err = o.commitUpload(ctx, session, parts)
 	if err != nil {
 		return fmt.Errorf("multipart upload failed to finalize: %w", err)
 	}
 
-	return o.finishUpload(ctx, *session.Key)
+	return o.finishUpload(ctx, session.Key)
 }
 
 // createUploadSession creates an upload session for the object
 func (o *Object) createUploadSession(ctx context.Context, leaf string, directoryID string, size int64, contentType string, modTime time.Time, hash string) (uploadResp *api.UploadMultipartRequestResponse, err error) {
-	var uploadReq interface{}
-	var endpoint string
 
-	if o.id != "" {
-		// Update existing file
-		uploadReq = api.RequestUploadUpdate{
-			Size:    size,
-			Type:    contentType,
-			Hash:    hash,
-			ModTime: api.Time(modTime),
-		}
-		endpoint = "/fs/files/" + o.id + "/upload/multipart"
-	} else {
-		// Create new file
-		uploadReq = api.RequestUploadCreate{
-			Name:     o.fs.opt.Enc.FromStandardName(leaf),
-			Size:     size,
-			Type:     contentType,
-			VaultID:  o.fs.opt.VaultID,
-			Hash:     hash,
-			ModTime:  api.Time(modTime),
-			ParentID: &directoryID,
-		}
-		endpoint = "/fs/files/upload/multipart"
+	// Create new file
+	uploadReq := api.RequestUploadCreate{
+		Name:     o.fs.opt.Enc.FromStandardName(leaf),
+		Size:     size,
+		Type:     contentType,
+		VaultID:  o.fs.opt.VaultID,
+		Hash:     hash,
+		ModTime:  api.Time(modTime),
+		ParentID: &directoryID,
+	}
+	opts := rest.Opts{
+		Method: "POST",
+		Path:   "/fs/files/upload/multipart",
 	}
 
 	var resp *http.Response
-	opts := rest.Opts{
-		Method: "POST",
-		Path:   endpoint,
-	}
-
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
 		resp, err = o.fs.srv.CallJSON(ctx, &opts, uploadReq, &uploadResp)
 		return shouldRetry(ctx, resp, err)
@@ -196,18 +181,18 @@ func (o *Object) createUploadSession(ctx context.Context, leaf string, directory
 }
 
 // uploadPart uploads a part in an upload session
-func (o *Object) uploadPart(ctx context.Context, SessionID string, partNumber int64, chunk []byte, wrap accounting.WrapFn, options ...fs.OpenOption) (response api.Part, err error) {
+func (o *Object) uploadPart(ctx context.Context, session *api.UploadMultipartRequestResponse, partNumber int64, chunk []byte, wrap accounting.WrapFn, options ...fs.OpenOption) (response api.Part, err error) {
 	// Get presigned URL for this part
 	opts := rest.Opts{
 		Method:  "PUT",
-		Path:    "/fs/files/upload/multipart/" + SessionID,
+		Path:    "/fs/files/upload/multipart/" + *session.MultipartUploadId,
 		Options: options,
 	}
 
 	chunkSize := int64(len(chunk))
 
 	signRequest := api.SignPartRequest{
-		Key: o.id,
+		Key: session.Key,
 		Parts: []struct {
 			PartNumber int64 `json:"PartNumber"`
 			Size       int64 `json:"Size"`
@@ -262,14 +247,14 @@ func (o *Object) uploadPart(ctx context.Context, SessionID string, partNumber in
 }
 
 // commitUpload finishes an upload session
-func (o *Object) commitUpload(ctx context.Context, SessionID string, parts []api.Part) (err error) {
+func (o *Object) commitUpload(ctx context.Context, session *api.UploadMultipartRequestResponse, parts []api.Part) (err error) {
 	opts := rest.Opts{
 		Method: "POST",
-		Path:   "/fs/files/upload/multipart/" + SessionID,
+		Path:   "/fs/files/upload/multipart/" + *session.MultipartUploadId,
 	}
 
 	request := api.CompleteMultipartUpload{
-		Key:   o.id,
+		Key:   session.Key,
 		Parts: parts,
 	}
 
@@ -288,7 +273,7 @@ func (o *Object) commitUpload(ctx context.Context, SessionID string, parts []api
 func (o *Object) abortUpload(ctx context.Context, SessionID string, Key string) (err error) {
 	opts := rest.Opts{
 		Method:     "DELETE",
-		Path:       "/fs/files/" + o.id + "/upload/multipart/" + SessionID,
+		Path:       "/fs/files/upload/multipart/" + SessionID,
 		NoResponse: true,
 	}
 	input := api.UploadAbortRequest{

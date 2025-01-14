@@ -194,13 +194,6 @@ type UpdateFileMetadata struct {
 
 // --- single upload ---
 
-type RequestUploadUpdate struct {
-	Size    int64  `json:"size"`
-	Type    string `json:"type"`
-	Hash    string `json:"hash"`
-	ModTime Time   `json:"modTime"`
-}
-
 type RequestUploadCreate struct {
 	Name      string  `json:"name"`
 	Size      int64   `json:"size"`
@@ -213,14 +206,14 @@ type RequestUploadCreate struct {
 }
 
 type UploadRequestResponse struct {
-	UploadUrl *string `json:"uploadUrl"`
-	Key       *string `json:"key"`
+	UploadUrl *string `json:"uploadUrl,omitempty"`
+	Key       string  `json:"key"`
 }
 
 // --- multipart upload ---
 type UploadMultipartRequestResponse struct {
-	MultipartUploadId *string `json:"multipartUploadId"`
-	Key               *string `json:"key"`
+	MultipartUploadId *string `json:"multipartUploadId,omitempty"`
+	Key               string  `json:"key"`
 }
 type UploadAbortRequest struct {
 	Key string `json:"key"`
@@ -233,7 +226,7 @@ type ListPartsRequest struct {
 type ListPartsResponse []Part
 
 type Part struct {
-	PartNumber int64  `json:"partNumber"`
+	PartNumber int64  `json:"PartNumber"`
 	ETag       string `json:"ETag,omitempty"`
 	Size       int64  `json:"Size,omitempty"`
 }
