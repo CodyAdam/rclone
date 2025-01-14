@@ -28,13 +28,13 @@ import (
 )
 
 const (
-	minSleep            = 10 * time.Millisecond
-	maxSleep            = 2 * time.Second
-	decayConstant       = 2                // bigger for slower decay, exponential
-	defaultUploadCutoff = 50 * 1024 * 1024 // 50MB
-	accessCookieName    = "authjs.session-token"
-	rootID              = "root"
-	// accessCookieName    = "__Secure-authjs.session-token"
+	minSleep               = 10 * time.Millisecond
+	maxSleep               = 2 * time.Second
+	decayConstant          = 2                // bigger for slower decay, exponential
+	defaultUploadCutoff    = 50 * 1024 * 1024 // 50MB
+	accessCookieName       = "authjs.session-token"
+	accessCookieNameSecure = "__Secure-authjs.session-token"
+	rootID                 = "root"
 )
 
 // Register with Fs
@@ -81,10 +81,9 @@ func init() {
 					encoder.EncodeBackSlash |
 					encoder.EncodeColon |
 					encoder.EncodeQuestion |
-					encoder.EncodeRightSpace |
-					encoder.EncodeRightPeriod |
 					encoder.EncodeLeftSpace |
 					encoder.EncodeRightSpace |
+					encoder.EncodeRightPeriod |
 					encoder.EncodeInvalidUtf8),
 			}},
 	})
@@ -285,8 +284,12 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 
 	// If using an accessToken, set the Authorization header
 	if f.opt.AccessToken != "" {
+		cookieName := accessCookieName
+		if strings.HasPrefix(f.opt.Endpoint, "https") {
+			cookieName = accessCookieNameSecure
+		}
 		f.srv.SetCookie(&http.Cookie{
-			Name:  accessCookieName,
+			Name:  cookieName,
 			Value: f.opt.AccessToken,
 			Path:  "/",
 		})
