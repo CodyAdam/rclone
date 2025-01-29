@@ -40,10 +40,10 @@ func getChunkSize(size int64) int64 {
 }
 
 // uploadMultipart uploads a file using multipart upload
-func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, contentType string, modTime time.Time, hash string, options ...fs.OpenOption) (err error) {
+func (o *Object) uploadMultipart(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, modTime time.Time, hash string, options ...fs.OpenOption) (err error) {
 
 	// Create upload session
-	session, err := o.createUploadSession(ctx, leaf, directoryID, size, contentType, modTime, hash)
+	session, err := o.createUploadSession(ctx, leaf, directoryID, size, modTime, hash)
 	if err != nil {
 		return fmt.Errorf("multipart upload create session failed: %w", err)
 	}
@@ -151,13 +151,12 @@ outer:
 }
 
 // createUploadSession creates an upload session for the object
-func (o *Object) createUploadSession(ctx context.Context, leaf string, directoryID string, size int64, contentType string, modTime time.Time, hash string) (uploadResp *api.UploadMultipartRequestResponse, err error) {
+func (o *Object) createUploadSession(ctx context.Context, leaf string, directoryID string, size int64, modTime time.Time, hash string) (uploadResp *api.UploadMultipartRequestResponse, err error) {
 
 	// Create new file
 	uploadReq := api.RequestUploadCreate{
 		Name:     o.fs.opt.Enc.FromStandardName(leaf),
 		Size:     size,
-		Type:     contentType,
 		VaultID:  o.fs.opt.VaultID,
 		Hash:     hash,
 		ModTime:  api.Time(modTime),

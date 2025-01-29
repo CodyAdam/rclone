@@ -270,7 +270,6 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 	f.features = (&fs.Features{
 		ReadMimeType:            true,
-		PartialUploads:          true,
 		WriteMimeType:           true,
 		UserMetadata:            true,
 		CanHaveEmptyDirectories: true,
@@ -1337,7 +1336,6 @@ func (o *Object) generateContentHash(in io.Reader) (string, error) {
 // The new object may have been created if an error is returned.
 func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, options ...fs.OpenOption) (err error) {
 	size := src.Size()
-	contentType := fs.MimeType(ctx, src)
 	modTime := src.ModTime(ctx)
 	remote := o.Remote()
 
@@ -1364,9 +1362,9 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 	contentReader := bytes.NewReader(allBytes)
 	// Upload with simple or multipart
 	if o.size <= int64(uploadCutoff) {
-		err = o.upload(ctx, contentReader, leaf, directoryID, size, contentType, modTime, hash, options...)
+		err = o.upload(ctx, contentReader, leaf, directoryID, size, modTime, hash, options...)
 	} else {
-		err = o.uploadMultipart(ctx, contentReader, leaf, directoryID, size, contentType, modTime, hash, options...)
+		err = o.uploadMultipart(ctx, contentReader, leaf, directoryID, size, modTime, hash, options...)
 	}
 	return err
 }
@@ -1374,12 +1372,11 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 // upload does a single non-multipart upload
 //
 // This is recommended for less than 50 MiB of content
-func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, contentType string, modTime time.Time, hash string, options ...fs.OpenOption) (err error) {
+func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, modTime time.Time, hash string, options ...fs.OpenOption) (err error) {
 	// Create new file
 	uploadReq := api.RequestUploadCreate{
 		Name:     o.fs.opt.Enc.FromStandardName(leaf),
 		Size:     size,
-		Type:     contentType,
 		VaultID:  o.fs.opt.VaultID,
 		Hash:     hash,
 		ModTime:  api.Time(modTime),

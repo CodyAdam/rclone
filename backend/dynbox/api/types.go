@@ -197,7 +197,6 @@ type UpdateFileMetadata struct {
 type RequestUploadCreate struct {
 	Name      string  `json:"name"`
 	Size      int64   `json:"size"`
-	Type      string  `json:"type"`
 	VaultID   string  `json:"vaultId"`
 	Hash      string  `json:"hash"`
 	ModTime   Time    `json:"modTime"`
@@ -211,6 +210,7 @@ type UploadRequestResponse struct {
 }
 
 // --- multipart upload ---
+
 type UploadMultipartRequestResponse struct {
 	MultipartUploadId *string `json:"multipartUploadId,omitempty"`
 	Key               string  `json:"key"`
