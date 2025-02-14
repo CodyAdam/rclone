@@ -32,8 +32,8 @@ const (
 	maxSleep               = 2 * time.Second
 	decayConstant          = 2                           // bigger for slower decay, exponential
 	uploadCutoff           = fs.SizeSuffix(50 * fs.Mebi) // bytes treshold for multipart upload
-	accessCookieName       = "authjs.session-token"
-	accessCookieNameSecure = "__Secure-authjs.session-token"
+	accessCookieName       = "dynbox.session_token"
+	accessCookieNameSecure = "__Secure-dynbox.session_token"
 	rootID                 = "root"
 )
 
@@ -193,11 +193,11 @@ func errorHandler(resp *http.Response) error {
 	return errResponse
 }
 
-// encodePathSegment encodes a filename using URL encoding
-// This replaces special characters with percent-encoded values
-func (f *Fs) encodePathSegment(name string) string {
-	return url.PathEscape(name)
-}
+// // encodePathSegment encodes a filename using URL encoding
+// // This replaces special characters with percent-encoded values
+// func (f *Fs) encodePathSegment(name string) string {
+// 	return url.PathEscape(name)
+// }
 
 // decodePathSegment decodes a URL-encoded filename back to its original form
 // This converts percent-encoded values back to original characters
@@ -232,23 +232,23 @@ func (f *Fs) decodePath(encodedPath string) (string, error) {
 	return strings.Join(segments, "/"), nil
 }
 
-// encodePath encodes each segment of a path using URL encoding
-// It splits the path by '/', encodes each segment, and rejoins with '/'
-func (f *Fs) encodePath(path string) string {
-	// Split path into segments
-	segments := strings.Split(path, "/")
+// // encodePath encodes each segment of a path using URL encoding
+// // It splits the path by '/', encodes each segment, and rejoins with '/'
+// func (f *Fs) encodePath(path string) string {
+// 	// Split path into segments
+// 	segments := strings.Split(path, "/")
 
-	// Encode each segment
-	for i, segment := range segments {
-		if segment == "" {
-			continue
-		}
-		segments[i] = f.encodePathSegment(segment)
-	}
+// 	// Encode each segment
+// 	for i, segment := range segments {
+// 		if segment == "" {
+// 			continue
+// 		}
+// 		segments[i] = f.encodePathSegment(segment)
+// 	}
 
-	// Rejoin segments with /
-	return strings.Join(segments, "/")
-}
+// 	// Rejoin segments with /
+// 	return strings.Join(segments, "/")
+// }
 
 // NewFs constructs an Fs from the path, container:path
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
