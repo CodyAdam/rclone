@@ -112,12 +112,17 @@ jobs:
               ;;
           esac
           
+          # Build the binary
           go build -trimpath -ldflags "-s -X github.com/codyadam/rclone/fs.Version=${VERSION}" -tags ${{ matrix.gotags }} -o "${OUTPUT_NAME}"
+          
+          # Create a directory for release artifacts
+          mkdir -p release-artifacts
+          mv "${OUTPUT_NAME}" release-artifacts/
 
       - name: Create Release
         uses: softprops/action-gh-release@v1
         if: startsWith(github.ref, 'refs/tags/')
         with:
-          files: rclone-*
+          files: release-artifacts/*
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
