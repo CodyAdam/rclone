@@ -270,7 +270,6 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 	}
 	f.features = (&fs.Features{
 		ReadMimeType:            true,
-		WriteMimeType:           true,
 		UserMetadata:            true,
 		CanHaveEmptyDirectories: true,
 	}).Fill(ctx, f)
@@ -338,10 +337,7 @@ func (f *Fs) rootSlash() string {
 func (f *Fs) About(ctx context.Context) (usage *fs.Usage, err error) {
 	opts := rest.Opts{
 		Method: "GET",
-		Path:   "/fs/usage",
-		Parameters: url.Values{
-			"vaultId": []string{f.opt.VaultID},
-		},
+		Path:   "/vaults/" + f.opt.VaultID + "/usage",
 	}
 	var data api.Usage
 	var resp *http.Response
@@ -585,8 +581,8 @@ func (f *Fs) preUploadCheck(ctx context.Context, leaf, directoryID string, size 
 		VaultID:  f.opt.VaultID,
 	}
 	opts := rest.Opts{
-		Method: "OPTIONS",
-		Path:   "/fs/files/upload",
+		Method: "POST",
+		Path:   "/fs/files/upload/check",
 	}
 	var result *api.PreUploadCheckResponse
 	var resp *http.Response
@@ -688,12 +684,12 @@ func (f *Fs) deleteObject(ctx context.Context, id string) error {
 		Method:     "DELETE",
 		Path:       "/fs/files/" + id,
 		NoResponse: true,
-	}
-	input := api.DeleteFile{
-		Permanent: false,
+		Parameters: url.Values{
+			"permanent": []string{"false"},
+		},
 	}
 	return f.pacer.Call(func() (bool, error) {
-		resp, err := f.srv.CallJSON(ctx, &opts, &input, nil)
+		resp, err := f.srv.CallJSON(ctx, &opts, nil, nil)
 		return shouldRetry(ctx, resp, err)
 	})
 }
@@ -715,16 +711,15 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 		Method:     "DELETE",
 		Path:       "/fs/folders/" + rootID,
 		NoResponse: true,
-	}
-	input := api.PurgeCheck{
-		FolderID:  &rootID,
-		VaultID:   f.opt.VaultID,
-		Recursive: !check,
-		Permanent: false,
+		Parameters: url.Values{
+			"vaultId":   []string{f.opt.VaultID},
+			"recursive": []string{fmt.Sprintf("%v", !check)},
+			"permanent": []string{"false"},
+		},
 	}
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, &input, nil)
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, nil)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
@@ -979,14 +974,14 @@ func (f *Fs) CleanUp(ctx context.Context) (err error) {
 		Method:     "DELETE",
 		Path:       "/fs/trash",
 		NoResponse: true,
-	}
-	input := api.Vault{
-		ID: f.opt.VaultID,
+		Parameters: url.Values{
+			"vaultId": []string{f.opt.VaultID},
+		},
 	}
 
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
-		resp, err = f.srv.CallJSON(ctx, &opts, &input, nil)
+		resp, err = f.srv.CallJSON(ctx, &opts, nil, nil)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
@@ -1254,7 +1249,7 @@ func (o *Object) ModTime(ctx context.Context) time.Time {
 // setModTime sets the modification time of the local fs object
 func (o *Object) setModTime(ctx context.Context, modTime time.Time) (*api.FileItem, error) {
 	opts := rest.Opts{
-		Method: "PUT",
+		Method: "PATCH",
 		Path:   "/fs/files/" + o.id,
 	}
 	update := api.UpdateFileMetadata{
@@ -1428,7 +1423,7 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 func (o *Object) finishUpload(ctx context.Context, key string) (err error) {
 	opts := rest.Opts{
 		Method: "POST",
-		Path:   "/fs/files/upload/finished",
+		Path:   "/fs/files/upload/finish",
 	}
 	input := api.RequestUploadFinished{
 		Key: key,
