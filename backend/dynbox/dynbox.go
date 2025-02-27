@@ -687,6 +687,7 @@ func (f *Fs) deleteObject(ctx context.Context, id string) error {
 		Parameters: url.Values{
 			"permanent": []string{"false"},
 		},
+		ContentType: "application/json",
 	}
 	return f.pacer.Call(func() (bool, error) {
 		resp, err := f.srv.CallJSON(ctx, &opts, nil, nil)
@@ -716,6 +717,7 @@ func (f *Fs) purgeCheck(ctx context.Context, dir string, check bool) error {
 			"recursive": []string{fmt.Sprintf("%v", !check)},
 			"permanent": []string{"false"},
 		},
+		ContentType: "application/json",
 	}
 	var resp *http.Response
 	err = f.pacer.Call(func() (bool, error) {
@@ -977,6 +979,7 @@ func (f *Fs) CleanUp(ctx context.Context) (err error) {
 		Parameters: url.Values{
 			"vaultId": []string{f.opt.VaultID},
 		},
+		ContentType: "application/json",
 	}
 
 	var resp *http.Response
