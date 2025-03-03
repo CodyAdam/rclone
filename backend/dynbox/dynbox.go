@@ -32,8 +32,6 @@ const (
 	maxSleep               = 2 * time.Second
 	decayConstant          = 2                           // bigger for slower decay, exponential
 	uploadCutoff           = fs.SizeSuffix(50 * fs.Mebi) // bytes treshold for multipart upload
-	accessCookieName       = "dynbox.session_token"
-	accessCookieNameSecure = "__Secure-dynbox.session_token"
 	rootID                 = "root"
 )
 
@@ -276,15 +274,7 @@ func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, e
 
 	// If using an accessToken, set the Authorization header
 	if f.opt.AccessToken != "" {
-		cookieName := accessCookieName
-		if strings.HasPrefix(f.opt.Endpoint, "https") {
-			cookieName = accessCookieNameSecure
-		}
-		f.srv.SetCookie(&http.Cookie{
-			Name:  cookieName,
-			Value: f.opt.AccessToken,
-			Path:  "/",
-		})
+		f.srv.SetHeader("Authorization", "Bearer "+f.opt.AccessToken)
 	}
 
 	// Get rootFolderID
