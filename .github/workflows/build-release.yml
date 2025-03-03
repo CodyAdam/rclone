@@ -99,16 +99,16 @@ jobs:
           # Build with platform specific name
           case "${{ matrix.job_name }}" in
             "linux")
-              OUTPUT_NAME="${BINARY_NAME}-${VERSION}-linux-amd64"
+              OUTPUT_NAME="${BINARY_NAME}-dynbox-x86_64-unknown-linux-gnu"
               ;;
             "mac_amd64")
-              OUTPUT_NAME="${BINARY_NAME}-${VERSION}-darwin-amd64"
+              OUTPUT_NAME="${BINARY_NAME}-dynbox-x86_64-apple-darwin"
               ;;
             "mac_arm64")
-              OUTPUT_NAME="${BINARY_NAME}-${VERSION}-darwin-arm64"
+              OUTPUT_NAME="${BINARY_NAME}-dynbox-aarch64-apple-darwin"
               ;;
             "windows")
-              OUTPUT_NAME="${BINARY_NAME}-${VERSION}-windows-amd64.exe"
+              OUTPUT_NAME="${BINARY_NAME}-dynbox-x86_64-pc-windows-msvc.exe"
               ;;
           esac
           
