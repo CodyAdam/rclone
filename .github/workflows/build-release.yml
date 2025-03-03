@@ -89,26 +89,21 @@ jobs:
         shell: bash
         run: |
           VERSION=${GITHUB_REF#refs/tags/}
-          BINARY_NAME="rclone"
-          
-          # Add extension for Windows
-          if [[ "${{ matrix.os }}" == "windows-latest" ]]; then
-            BINARY_NAME="${BINARY_NAME}.exe"
-          fi
+          BINARY_NAME="rclone-dynbox"
           
           # Build with platform specific name
           case "${{ matrix.job_name }}" in
             "linux")
-              OUTPUT_NAME="${BINARY_NAME}-dynbox-x86_64-unknown-linux-gnu"
+              OUTPUT_NAME="${BINARY_NAME}-x86_64-unknown-linux-gnu"
               ;;
             "mac_amd64")
-              OUTPUT_NAME="${BINARY_NAME}-dynbox-x86_64-apple-darwin"
+              OUTPUT_NAME="${BINARY_NAME}-x86_64-apple-darwin"
               ;;
             "mac_arm64")
-              OUTPUT_NAME="${BINARY_NAME}-dynbox-aarch64-apple-darwin"
+              OUTPUT_NAME="${BINARY_NAME}-aarch64-apple-darwin"
               ;;
             "windows")
-              OUTPUT_NAME="${BINARY_NAME}-dynbox-x86_64-pc-windows-msvc.exe"
+              OUTPUT_NAME="${BINARY_NAME}-x86_64-pc-windows-msvc.exe"
               ;;
           esac
           
