@@ -28,11 +28,11 @@ import (
 )
 
 const (
-	minSleep               = 10 * time.Millisecond
-	maxSleep               = 2 * time.Second
-	decayConstant          = 2                           // bigger for slower decay, exponential
-	uploadCutoff           = fs.SizeSuffix(50 * fs.Mebi) // bytes treshold for multipart upload
-	rootID                 = "root"
+	minSleep      = 10 * time.Millisecond
+	maxSleep      = 2 * time.Second
+	decayConstant = 2                           // bigger for slower decay, exponential
+	uploadCutoff  = fs.SizeSuffix(50 * fs.Mebi) // bytes treshold for multipart upload
+	rootID        = "root"
 )
 
 // Register with Fs
@@ -58,7 +58,7 @@ func init() {
 		}, {
 			Name:     "endpoint",
 			Help:     "API endpoint",
-			Default:  "https://dynbox.co/api/fs",
+			Default:  "https://dynbox.co/api",
 			Advanced: true,
 		},
 			{
@@ -1401,8 +1401,11 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 		Options:       options,
 	}
 
+	// Use a clean client without auth headers for the upload to signed URL
+	client := rest.NewClient(fshttp.NewClient(ctx)).SetErrorHandler(errorHandler)
+
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-		resp, err = o.fs.srv.Call(ctx, &opts)
+		resp, err = client.Call(ctx, &opts)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {

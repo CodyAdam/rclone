@@ -213,6 +213,7 @@ func (o *Object) uploadPart(ctx context.Context, session *api.UploadMultipartReq
 
 	// Upload the part using the presigned URL
 	presignedURL := signResponse[0].UploadUrl
+
 	req, err := http.NewRequestWithContext(ctx, "PUT", presignedURL, wrap(bytes.NewReader(chunk)))
 	if err != nil {
 		return response, fmt.Errorf("failed to create request: %w", err)
