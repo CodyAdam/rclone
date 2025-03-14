@@ -16,6 +16,11 @@ jobs:
             gotags: cmount
             build_flags: '-include "^linux/"'
 
+          - job_name: linux_arm64
+            os: ubuntu-latest
+            gotags: cmount
+            build_flags: '-include "^linux/" -goos linux -goarch arm64'
+
           - job_name: mac_amd64
             os: macos-latest
             gotags: 'cmount'
@@ -96,6 +101,9 @@ jobs:
             "linux")
               OUTPUT_NAME="${BINARY_NAME}-x86_64-unknown-linux-gnu"
               ;;
+            "linux_arm64")
+              OUTPUT_NAME="${BINARY_NAME}-aarch64-unknown-linux-gnu"
+              ;;
             "mac_amd64")
               OUTPUT_NAME="${BINARY_NAME}-x86_64-apple-darwin"
               ;;
@@ -108,7 +116,11 @@ jobs:
           esac
           
           # Build the binary
-          go build -trimpath -ldflags "-s -X github.com/codyadam/rclone/fs.Version=${VERSION}" -tags ${{ matrix.gotags }} -o "${OUTPUT_NAME}"
+          if [[ "${{ matrix.job_name }}" == "linux_arm64" ]]; then
+            GOARCH=arm64 go build -trimpath -ldflags "-s -X github.com/codyadam/rclone/fs.Version=${VERSION}" -tags ${{ matrix.gotags }} -o "${OUTPUT_NAME}"
+          else
+            go build -trimpath -ldflags "-s -X github.com/codyadam/rclone/fs.Version=${VERSION}" -tags ${{ matrix.gotags }} -o "${OUTPUT_NAME}"
+          fi
           
           # Create a directory for release artifacts
           mkdir -p release-artifacts
