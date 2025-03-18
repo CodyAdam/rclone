@@ -183,8 +183,8 @@ func (o *Object) createUploadSession(ctx context.Context, leaf string, directory
 func (o *Object) uploadPart(ctx context.Context, session *api.UploadMultipartRequestResponse, partNumber int64, chunk []byte, wrap accounting.WrapFn, options ...fs.OpenOption) (response api.Part, err error) {
 	// Get presigned URL for this part
 	opts := rest.Opts{
-		Method:  "PUT",
-		Path:    "/fs/files/upload/multipart/" + *session.MultipartUploadId,
+		Method:  "POST",
+		Path:    "/fs/files/upload/multipart/" + *session.MultipartUploadId + "/sign",
 		Options: options,
 	}
 
@@ -250,7 +250,7 @@ func (o *Object) uploadPart(ctx context.Context, session *api.UploadMultipartReq
 func (o *Object) commitUpload(ctx context.Context, session *api.UploadMultipartRequestResponse, parts []api.Part) (err error) {
 	opts := rest.Opts{
 		Method: "POST",
-		Path:   "/fs/files/upload/multipart/" + *session.MultipartUploadId,
+		Path:   "/fs/files/upload/multipart/" + *session.MultipartUploadId + "/complete",
 	}
 
 	request := api.CompleteMultipartUpload{
@@ -272,8 +272,8 @@ func (o *Object) commitUpload(ctx context.Context, session *api.UploadMultipartR
 // abortUpload cancels an upload session
 func (o *Object) abortUpload(ctx context.Context, SessionID string, Key string) (err error) {
 	opts := rest.Opts{
-		Method:     "DELETE",
-		Path:       "/fs/files/upload/multipart/" + SessionID,
+		Method:     "POST",
+		Path:       "/fs/files/upload/multipart/" + SessionID + "/abort",
 		NoResponse: true,
 	}
 	input := api.UploadAbortRequest{
