@@ -109,9 +109,9 @@ type Usage struct {
 		BillingCycleStart int64  `json:"billingCycleStart"`
 	} `json:"vault"`
 	AI struct {
-		Used  int64 `json:"used"`
-		Total int64 `json:"total"`
-		Free  int64 `json:"free"`
+		Used  float64 `json:"used"`
+		Total float64 `json:"total"`
+		Free  float64 `json:"free"`
 	} `json:"ai"`
 	FS struct {
 		Used        int64 `json:"used"`

@@ -1259,22 +1259,20 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		return err
 	}
 
-	// Generate all supported hashes of the content
-	hasher, err := hash.NewMultiHasherTypes(o.fs.Hashes())
-	if err != nil {
-		return err
-	}
-
-	// Get all the hashes as hex strings
-	sums := hasher.Sums()
 	hashes := make(map[string]string)
-	for hashType, hashString := range sums {
-		hashes[hashType.String()] = hashString
+	for _, hashType := range o.fs.Hashes().Array() {
+		hashString, err := src.Hash(ctx, hashType)
+		if err != nil {
+			return err
+		}
+		if hashString != "" {
+			hashes[hashType.String()] = hashString
+		}
 	}
 
 	fs.Debugf(o, "Hashes: %v", hashes)
 
-	// Create new file
+	// Create new file - Dynbox only stores metadata, not the file content
 	uploadReq := api.RequestUploadCreate{
 		Name:     o.fs.opt.Enc.FromStandardName(leaf),
 		Size:     size,
