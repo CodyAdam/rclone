@@ -63,14 +63,14 @@ type Item struct {
 
 type FileItem struct {
 	Item
-	Size             int64   `json:"size"`
-	FolderPath       string  `json:"folderPath"`
-	CurrentVersionID *string `json:"currentVersionId,omitempty"`
-	ContentType      string  `json:"type"`
-	Path             string  `json:"path"`
-	Hash             string  `json:"hash"`
-	Key              string  `json:"key"`
-	RawModTime       Time    `json:"modTime"`
+	Size             int64             `json:"size"`
+	FolderPath       string            `json:"folderPath"`
+	CurrentVersionID *string           `json:"currentVersionId,omitempty"`
+	ContentType      string            `json:"type"`
+	Path             string            `json:"path"`
+	Hashes           map[string]string `json:"hashes"`
+	Key              string            `json:"key"`
+	RawModTime       Time              `json:"modTime"`
 }
 
 type FolderItem struct {
@@ -114,15 +114,14 @@ type Usage struct {
 		Free  int64 `json:"free"`
 	} `json:"ai"`
 	FS struct {
-		Used         int64 `json:"used"`
-		Total        int64 `json:"total"`
-		Free         int64 `json:"free"`
-		Trashed      int64 `json:"trashed"`
-		Other        int64 `json:"other"`
-		FolderCount  int64 `json:"folderCount"`
-		FileCount    int64 `json:"fileCount"`
-		ObjectCount  int64 `json:"objectCount"`
-		VersionCount int64 `json:"versionCount"`
+		Used        int64 `json:"used"`
+		Total       int64 `json:"total"`
+		Free        int64 `json:"free"`
+		Trashed     int64 `json:"trashed"`
+		Other       int64 `json:"other"`
+		FolderCount int64 `json:"folderCount"`
+		FileCount   int64 `json:"fileCount"`
+		ObjectCount int64 `json:"objectCount"`
 	} `json:"fs"`
 }
 
@@ -195,64 +194,13 @@ type UpdateFileMetadata struct {
 // --- single upload ---
 
 type RequestUploadCreate struct {
-	Name      string  `json:"name"`
-	Size      int64   `json:"size"`
-	VaultID   string  `json:"vaultId"`
-	Hash      string  `json:"hash"`
-	ModTime   Time    `json:"modTime"`
-	CreatedAt *Time   `json:"createdAt,omitempty"`
-	ParentID  *string `json:"parentId,omitempty"` // null if root
-}
-
-type UploadRequestResponse struct {
-	UploadUrl *string `json:"uploadUrl,omitempty"`
-	Key       string  `json:"key"`
-}
-
-// --- multipart upload ---
-
-type UploadMultipartRequestResponse struct {
-	MultipartUploadId *string `json:"multipartUploadId,omitempty"`
-	Key               string  `json:"key"`
-}
-type UploadAbortRequest struct {
-	Key string `json:"key"`
-}
-
-type ListPartsRequest struct {
-	Key string `json:"key"`
-}
-
-type ListPartsResponse []Part
-
-type Part struct {
-	PartNumber int64  `json:"PartNumber"`
-	ETag       string `json:"ETag,omitempty"`
-	Size       int64  `json:"Size,omitempty"`
-}
-
-type PartWithUrl struct {
-	Part
-	UploadUrl string `json:"uploadUrl"`
-}
-
-type SignPartRequest struct {
-	Key   string `json:"key"`
-	Parts []struct {
-		PartNumber int64 `json:"PartNumber"`
-		Size       int64 `json:"Size"`
-	} `json:"parts"`
-}
-
-type SignPartResponse []PartWithUrl
-
-type CompleteMultipartUpload struct {
-	Parts []Part `json:"parts"`
-	Key   string `json:"key"`
-}
-
-type CompleteMultipartUploadResponse struct {
-	Location string `json:"location"`
+	Name      string            `json:"name"`
+	Size      int64             `json:"size"`
+	VaultID   string            `json:"vaultId"`
+	Hashes    map[string]string `json:"hashes"`
+	ModTime   Time              `json:"modTime"`
+	CreatedAt *Time             `json:"createdAt,omitempty"`
+	ParentID  *string           `json:"parentId,omitempty"` // null if root
 }
 
 // --- events ---

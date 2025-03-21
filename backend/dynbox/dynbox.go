@@ -1,7 +1,6 @@
 package dynbox
 
 import (
-	"bytes"
 	"context"
 	"errors"
 	"fmt"
@@ -101,19 +100,19 @@ type Fs struct {
 	pacer    *fs.Pacer          // pacer for API calls
 }
 
-// Object describes a box object
+// Object describes a Dynbox object
 //
 // Will definitely have info but maybe not meta
 type Object struct {
 	hasMetaData bool
-	fs          *Fs       // what this object is part of
-	remote      string    // The remote path
-	size        int64     // size of the object
-	id          string    // ID of the object
-	modTime     time.Time // modification time of the object
-	hash        string    // SHA-256 of the object content
-	contentType string    // MIME type of the object
-	isDeleted   bool      // true if the object is deleted
+	fs          *Fs               // what this object is part of
+	remote      string            // The remote path
+	size        int64             // size of the object
+	id          string            // ID of the object
+	modTime     time.Time         // modification time of the object
+	hashes      map[string]string // hashes of the object content
+	contentType string            // MIME type of the object
+	isDeleted   bool              // true if the object is deleted
 }
 
 // ------------------------------------------------------------
@@ -145,7 +144,7 @@ func (f *Fs) Precision() time.Duration {
 
 // Hashes returns the supported hash types of the filesystem
 func (f *Fs) Hashes() hash.Set {
-	return hash.Set(hash.SHA256)
+	return hash.NewHashSet(hash.SHA256, hash.MD5, hash.SHA1, hash.CRC32, hash.Whirlpool)
 }
 
 // retryErrorCodes is a slice of error codes that we will retry
@@ -191,12 +190,6 @@ func errorHandler(resp *http.Response) error {
 	return errResponse
 }
 
-// // encodePathSegment encodes a filename using URL encoding
-// // This replaces special characters with percent-encoded values
-// func (f *Fs) encodePathSegment(name string) string {
-// 	return url.PathEscape(name)
-// }
-
 // decodePathSegment decodes a URL-encoded filename back to its original form
 // This converts percent-encoded values back to original characters
 func (f *Fs) decodePathSegment(encodedName string) (string, error) {
@@ -229,24 +222,6 @@ func (f *Fs) decodePath(encodedPath string) (string, error) {
 	// Rejoin segments with /
 	return strings.Join(segments, "/"), nil
 }
-
-// // encodePath encodes each segment of a path using URL encoding
-// // It splits the path by '/', encodes each segment, and rejoins with '/'
-// func (f *Fs) encodePath(path string) string {
-// 	// Split path into segments
-// 	segments := strings.Split(path, "/")
-
-// 	// Encode each segment
-// 	for i, segment := range segments {
-// 		if segment == "" {
-// 			continue
-// 		}
-// 		segments[i] = f.encodePathSegment(segment)
-// 	}
-
-// 	// Rejoin segments with /
-// 	return strings.Join(segments, "/")
-// }
 
 // NewFs constructs an Fs from the path, container:path
 func NewFs(ctx context.Context, name, root string, m configmap.Mapper) (fs.Fs, error) {
@@ -921,45 +896,6 @@ func (f *Fs) move(ctx context.Context, isFile bool, id, leaf, directoryID string
 	return nil, nil
 }
 
-// FIXME Public Links are not supported yet
-// // PublicLink adds a "readable by anyone with link" permission on the given file or folder.
-// func (f *Fs) PublicLink(ctx context.Context, remote string, expire fs.Duration, unlink bool) (string, error) {
-// 	id, err := f.dirCache.FindDir(ctx, remote, false)
-// 	var opts rest.Opts
-// 	if err == nil { // is a directory
-// 		fs.Debugf(f, "attempting to share directory '%s'", remote)
-
-// 		opts = rest.Opts{
-// 			Method: "PUT",
-// 			Path:   "/folders/" + id,
-// 		}
-// 	} else { // is a file
-// 		fs.Debugf(f, "attempting to share single file '%s'", remote)
-// 		o, err := f.NewObject(ctx, remote)
-// 		if err != nil {
-// 			return "", err
-// 		}
-
-// 		if o.(*Object).publicLink != "" {
-// 			return o.(*Object).publicLink, nil
-// 		}
-
-// 		opts = rest.Opts{
-// 			Method: "PUT",
-// 			Path:   "/files/" + o.(*Object).id,
-// 		}
-// 	}
-
-// 	shareLink := api.CreateSharedLink{}
-// 	var info api.Item
-// 	var resp *http.Response
-// 	err = f.pacer.Call(func() (bool, error) {
-// 		resp, err = f.srv.CallJSON(ctx, &opts, &shareLink, &info)
-// 		return shouldRetry(ctx, resp, err)
-// 	})
-// 	return info.SharedLink.URL, err
-// }
-
 // CleanUp empties the trash
 func (f *Fs) CleanUp(ctx context.Context) (err error) {
 	opts := rest.Opts{
@@ -1177,12 +1113,21 @@ func (o *Object) Remote() string {
 	return o.remote
 }
 
-// Hash returns the SHA-256 of an object returning a lowercase hex string
+// Hash returns the requested hash of an object returning a lowercase hex string
 func (o *Object) Hash(ctx context.Context, t hash.Type) (string, error) {
-	if t != hash.SHA256 {
-		return "", hash.ErrUnsupported
+	err := o.readMetaData(ctx)
+	if err != nil {
+		return "", err
 	}
-	return o.hash, nil
+
+	// Convert hash type to string representation
+	hashName := t.String()
+	// Return the hash if available in the hash map
+	if hash, ok := o.hashes[hashName]; ok {
+		return hash, nil
+	}
+
+	return "", hash.ErrUnsupported
 }
 
 // Size returns the size of an object in bytes
@@ -1200,7 +1145,7 @@ func (o *Object) setMetaData(info *api.FileItem) (err error) {
 	o.hasMetaData = true
 	o.id = info.ID
 	o.size = info.Size
-	o.hash = info.Hash
+	o.hashes = info.Hashes
 	o.contentType = info.ContentType
 	o.modTime = info.ModTime()
 	o.isDeleted = info.IsDeleted()
@@ -1298,25 +1243,6 @@ func (o *Object) Open(ctx context.Context, options ...fs.OpenOption) (in io.Read
 	return resp.Body, err
 }
 
-// generateContentHash generates the SHA-256 hash of the object's content before uploading
-func (o *Object) generateContentHash(in io.Reader) (string, error) {
-	// Create a new SHA-256 hasher
-	hasher, err := hash.NewMultiHasherTypes(hash.NewHashSet(hash.SHA256))
-	if err != nil {
-		return "", err
-	}
-
-	// Copy the input to the hasher
-	_, err = io.Copy(hasher, in)
-	if err != nil {
-		return "", err
-	}
-
-	// Get the hash as a hex string
-	sums := hasher.Sums()
-	return sums[hash.SHA256], nil
-}
-
 // Update the object with the contents of the io.Reader, modTime and size
 //
 // If existing is set then it updates the object rather than creating a new one.
@@ -1333,40 +1259,27 @@ func (o *Object) Update(ctx context.Context, in io.Reader, src fs.ObjectInfo, op
 		return err
 	}
 
-	// Read all content first since we need to use it twice
-	// (once for hash verification and once for upload)
-	allBytes, err := io.ReadAll(in)
-	if err != nil {
-		return fmt.Errorf("failed to read upload content: %w", err)
-	}
-
-	// First pass: verify hash
-	hashReader := bytes.NewReader(allBytes)
-	hash, err := o.generateContentHash(hashReader)
+	// Generate all supported hashes of the content
+	hasher, err := hash.NewMultiHasherTypes(o.fs.Hashes())
 	if err != nil {
 		return err
 	}
 
-	contentReader := bytes.NewReader(allBytes)
-	// Upload with simple or multipart
-	if o.size <= int64(uploadCutoff) {
-		err = o.upload(ctx, contentReader, leaf, directoryID, size, modTime, hash, options...)
-	} else {
-		err = o.uploadMultipart(ctx, contentReader, leaf, directoryID, size, modTime, hash, options...)
+	// Get all the hashes as hex strings
+	sums := hasher.Sums()
+	hashes := make(map[string]string)
+	for hashType, hashString := range sums {
+		hashes[hashType.String()] = hashString
 	}
-	return err
-}
 
-// upload does a single non-multipart upload
-//
-// This is recommended for less than 50 MiB of content
-func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID string, size int64, modTime time.Time, hash string, options ...fs.OpenOption) (err error) {
+	fs.Debugf(o, "Hashes: %v", hashes)
+
 	// Create new file
 	uploadReq := api.RequestUploadCreate{
 		Name:     o.fs.opt.Enc.FromStandardName(leaf),
 		Size:     size,
 		VaultID:  o.fs.opt.VaultID,
-		Hash:     hash,
+		Hashes:   hashes,
 		ModTime:  api.Time(modTime),
 		ParentID: &directoryID,
 	}
@@ -1374,66 +1287,19 @@ func (o *Object) upload(ctx context.Context, in io.Reader, leaf, directoryID str
 	fs.Debugf(o, "modTime: %v", modTime)
 
 	var resp *http.Response
-	var uploadResp api.UploadRequestResponse
 	opts := rest.Opts{
 		Method: "POST",
-		Path:   "/fs/files/upload/single",
+		Path:   "/fs/files/upload",
 	}
 
 	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-		resp, err = o.fs.srv.CallJSON(ctx, &opts, uploadReq, &uploadResp)
+		resp, err = o.fs.srv.CallJSON(ctx, &opts, uploadReq, nil)
 		return shouldRetry(ctx, resp, err)
 	})
 	if err != nil {
 		return err
 	}
-	if uploadResp.UploadUrl == nil {
-		// No upload needed - file was cached
-		return o.readMetaData(ctx)
-	}
-
-	// Upload the file to the provided signed URL
-	opts = rest.Opts{
-		Method:        "PUT",
-		RootURL:       *uploadResp.UploadUrl,
-		Body:          in,
-		ContentLength: &size, // Add explicit content length
-		Options:       options,
-	}
-
-	// Use a clean client without auth headers for the upload to signed URL
-	client := rest.NewClient(fshttp.NewClient(ctx)).SetErrorHandler(errorHandler)
-
-	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-		resp, err = client.Call(ctx, &opts)
-		return shouldRetry(ctx, resp, err)
-	})
-	if err != nil {
-		return err
-	}
-
-	return o.finishUpload(ctx, uploadResp.Key)
-}
-
-// finishUpload finalises the upload and update the metadata of the object
-func (o *Object) finishUpload(ctx context.Context, key string) (err error) {
-	opts := rest.Opts{
-		Method: "POST",
-		Path:   "/fs/files/upload/finish",
-	}
-	input := api.RequestUploadFinished{
-		Key: key,
-	}
-	var result *api.FileItem
-	var resp *http.Response
-	err = o.fs.pacer.CallNoRetry(func() (bool, error) {
-		resp, err = o.fs.srv.CallJSON(ctx, &opts, &input, &result)
-		return shouldRetry(ctx, resp, err)
-	})
-	if err != nil {
-		return err
-	}
-	return o.setMetaData(result)
+	return o.readMetaData(ctx)
 }
 
 // Remove an object
@@ -1460,9 +1326,8 @@ var (
 	_ fs.Mover           = (*Fs)(nil)
 	_ fs.DirMover        = (*Fs)(nil)
 	_ fs.DirCacheFlusher = (*Fs)(nil)
-	// _ fs.PublicLinker    = (*Fs)(nil)
-	_ fs.CleanUpper = (*Fs)(nil)
-	_ fs.Object     = (*Object)(nil)
-	_ fs.MimeTyper  = (*Object)(nil)
-	_ fs.IDer       = (*Object)(nil)
+	_ fs.CleanUpper      = (*Fs)(nil)
+	_ fs.Object          = (*Object)(nil)
+	_ fs.MimeTyper       = (*Object)(nil)
+	_ fs.IDer            = (*Object)(nil)
 )
